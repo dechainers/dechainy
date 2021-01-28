@@ -1,0 +1,26 @@
+name: Docker Image Test
+
+on: push
+  #pull_request:
+  #  types:
+  #    - opened
+  #    - reopened
+  #    - synchronize
+
+jobs:
+  build-and-test:
+    name: Build and Test Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Building Docker Test image
+      run: |
+        docker build --build-arg DEFAULT_BUILDTYPE=test -f Dockerfile -t s41m0n/dechainy:test .
+    - name: Testing Docker Image
+      run: |
+        docker run --rm --privileged --network host \
+          -v /lib/modules:/lib/modules:ro \
+          -v /etc/localtime:/etc/localtime:ro \
+          -v /usr/src:/usr/src:ro \
+          s41m0n/dechainy:test pytest

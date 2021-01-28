@@ -1,0 +1,36 @@
+name: API Doc autogen
+
+on: push
+  #pull_request:
+  #  types:
+  #    - closed
+    
+jobs:
+  docker-docgen:
+    name: Release DocGen Image and API Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build Docker image
+        run: |
+          docker build -f Dockerfile.docgen -t s41m0n/dechainy:docgen .
+      - name: Creating Doc commit
+        run: |
+          mkdir -p /tmp/api
+          docker run --rm --privileged --network host \
+            -v /lib/modules:/lib/modules:ro \
+            -v /etc/localtime:/etc/localtime:ro \
+            -v /usr/src:/usr/src:ro \
+            -v /tmp:/tmp:rw \
+            s41m0n/dechainy:docgen pdoc3 dechainy/ -o /tmp
+          sudo rm -rf docs/api/*
+          sudo mv /tmp/dechainy/* docs/api/
+          sudo chown -R 1000 docs/api/
+          sudo chgrp -R 1000 docs/api/
+          git config --global user.name 'Simone Magnani'
+          git config --global user.email 'simonemagnani.96@gmail.com'
+          if [[ `git status --porcelain` ]]; then
+            git add .
+            git commit -s -m "Automatic Docgen commit"
+            git push origin master
+          fi

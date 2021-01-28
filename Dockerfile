@@ -1,0 +1,77 @@
+# Copyright 2020 DeChainy
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+########################################
+# Builder image, to compile latest BCC #
+########################################
+FROM ubuntu:18.04 as builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get -y install pbuilder aptitude && \
+    cd /root && \
+    git clone https://github.com/iovisor/bcc.git
+
+WORKDIR /root/bcc
+
+RUN /usr/lib/pbuilder/pbuilder-satisfydepends && \
+    ./scripts/build-deb.sh release
+
+######################
+# Final Docker image #
+######################
+FROM python:3.8-slim
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Supported "default", "test" and "ml"
+ARG DEFAULT_BUILDTYPE="default"
+ENV BUILDTYPE=$DEFAULT_BUILDTYPE
+
+COPY --from=builder /root/bcc/*.deb /root/bcc/
+COPY . /app
+WORKDIR /app
+
+RUN \
+  apt update -y && \
+  apt install -y libncurses5 binutils python python3 libelf1 kmod  && \
+  pip3 install dnslib cachetools  && \
+  dpkg -i /root/bcc/*.deb && \
+  ln -s /usr/lib/python3/dist-packages/bcc /usr/local/lib/python3.8/site-packages/bcc && \
+  pip install -r requirements.txt && \
+  if [ "$BUILDTYPE" = "test" ] ; then       \
+    apt install -y python3-pytest &&        \
+    pip install pytest flake8;              \
+  else                                      \
+    rm -rf /app/tests;                      \
+  fi && \
+  if [ "$BUILDTYPE" = "ml" ] ; then \
+    pip install tensorflow keras; \
+  fi && \
+  rm -rf /root/bcc && \
+  apt clean && \
+  apt autoremove
+
+CMD exec python -W ignore -m dechainy
+
+#######################
+# docker run --rm -it --privileged --network host -v /lib/modules:/lib/modules:ro \
+#   -v /usr/src:/usr/src:ro \
+#   -v /etc/localtime:/etc/localtime:ro \
+#   s41m0n/dechainy:latest <---------- or dechain:ml-cpu
+#
+# Could mount every volume, to make the docker access /tmp, or mount the entire DeChainy folder
+# to "get" your local updated code, or mount even a NN model for simplicity.
+#######################
