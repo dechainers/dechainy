@@ -1,9 +1,9 @@
 name: API Doc autogen
 
-on: push
-  #pull_request:
-  #  types:
-  #    - closed
+on:
+  pull_request:
+    types:
+      - closed
     
 jobs:
   docker-docgen:

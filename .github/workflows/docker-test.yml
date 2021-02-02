@@ -1,11 +1,11 @@
 name: Docker Image Test
 
-on: push
-  #pull_request:
-  #  types:
-  #    - opened
-  #    - reopened
-  #    - synchronize
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
 
 jobs:
   build-and-test:

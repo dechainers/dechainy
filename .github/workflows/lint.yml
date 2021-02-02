@@ -1,11 +1,11 @@
 name: Check linting
 
-on: push
-  #pull_request:
-  #  types:
-  #    - opened
-  #    - reopened
-  #    - synchronize
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
 
 jobs:
   python-lint:

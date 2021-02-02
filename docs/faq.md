@@ -5,7 +5,7 @@ the [BCC F.A.Q](https://github.com/iovisor/bcc/blob/master/FAQ.txt), in case the
 
 **[Q] - Why not using GiHub actions for the docs instead of readthedocs?**
 
-[A] - As you may see, there is a [config.yml](_config.yml) file, but since also my personal website is published under GitHub Pages ([here](https://s41m0n.github.io)) the *search* bar of the generated DeChainy website would fail, looking into the root domain instead of in the project subfolder.
+[A] - Since also my personal website is published under GitHub Pages ([here](https://s41m0n.github.io)) the *search* bar of the generated DeChainy website would fail, looking into the root domain instead of in the project subfolder.
 
 **[Q] - Why the Release workflow uses custom run command instead of [this](https://github.com/marketplace/actions/build-and-push-docker-images)?**
 
