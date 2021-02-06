@@ -58,8 +58,8 @@ __protocol_map = {
 }
 
 # Variable to check whether Batch operations are supported
-__is_batch_supp = run(
-    ['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('-')[1] >= '050600'
+__major, __minor = [int(x) for x in run(['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('.')[:2]]
+__is_batch_supp = True if __major > 5 or (__major == 5 and __minor >= 6) else False
 
 
 def __normalize_and_padding(samples: List[List[any]], high: float = 1.0, low: float = 0.0) -> np.array:

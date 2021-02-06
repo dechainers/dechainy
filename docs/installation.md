@@ -51,7 +51,7 @@ docker run --rm --privileged --network host \
     -v /lib/modules:/lib/modules:ro \
     -v /etc/localtime:/etc/localtime:ro \
     -v /usr/src:/usr/src:ro \
-    -v $(pwd)/DeChainy:/app/:ro \ # you can mount at runtime the new code you develop, instead of rebuilding it
+    -v $(pwd)/dechainy:/app/:ro \ # you can mount at runtime the new code you develop, instead of rebuilding it
     -v $(pwd)/startup.json:/app/startup.json:ro \ # or you can just mount only the startup configuration
     s41m0n/dechainy:latest
 ```

@@ -141,7 +141,8 @@ class Controller(metaclass=Singleton):
         # Remove only once all kind of eBPF programs attached to all interfaces in use.
         for idx in self.__programs.keys():
             if self.__programs[idx].ingress_xdp or self.__programs[idx].egress_xdp:
-                BPF.remove_xdp(self.__programs[idx].name)
+                BPF.remove_xdp(
+                    self.__programs[idx].name, self.__programs[idx].flags)
             if self.__programs[idx].ingress_tc or self.__programs[idx].egress_tc:
                 self.__ip.tc("del", "clsact", idx)
         self.__ip.link("del", ifname="DeChainy")
@@ -442,7 +443,8 @@ class Controller(metaclass=Singleton):
         args = tuple([message.args[i] for i in range(0, decoded.count('%'))])
         formatted = decoded % args
         self.__logger.info(
-            f'CP log message from Probe({message.metadata.probe_id}) CPU({cpu}) PType({message.metadata.ptype}): {formatted}')
+            f'DP log message from Probe({message.metadata.probe_id}) CPU({cpu}) '
+            f'PType({message.metadata.ptype}) IfIndex({message.metadata.ifindex}): {formatted}')
 
     def __parse_packet(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
         """Method to parse a packet received from the Dataplane
@@ -489,6 +491,7 @@ class Controller(metaclass=Singleton):
             type_of_interest = f'{program_type}_{mode_map_name}'
 
             target = self.__programs[program.idx][type_of_interest]
+            # TODO: dumb IDs, not safe when deleting a probe in the middle
             current_probes = len(target)
             # Checking if only two programs left into the interface, meaning
             # that also the pivoting has to be removed
@@ -502,7 +505,8 @@ class Controller(metaclass=Singleton):
                     if mode == BPF.SCHED_CLS:
                         self.__ip.tc("del", "clsact", program.idx)
                     else:
-                        BPF.remove_xdp(program.interface)
+                        BPF.remove_xdp(program.interface,
+                                       self.__programs[program.idx][0].flags)
                 continue
 
             # Retrieving the index of the Program retrieved
@@ -511,8 +515,9 @@ class Controller(metaclass=Singleton):
                 # The program is not the last one in the list, so
                 # modify program CHAIN in order that the previous program calls the
                 # following one instead of the one to be removed
-                target[0][next_map_name][program.probe_id -
-                                         1] = ct.c_int(target[index + 1].fd)
+                if not target[0][next_map_name][program.probe_id - 1].red_idx:
+                    target[0][next_map_name][program.probe_id - 1] =  \
+                        ct.c_int(target[index + 1].fd)
             else:
                 # The program is the last one in the list, so set the previous
                 # program to call the following one which will be empty
@@ -525,6 +530,8 @@ class Controller(metaclass=Singleton):
     def __inject_pivot(
             self,
             mode: int,
+            flags: int,
+            offload_device: str,
             interface: str,
             idx: int,
             program_type: str,
@@ -534,6 +541,8 @@ class Controller(metaclass=Singleton):
 
         Args:
             mode (int): The mode of the program (XDP or TC)
+            flags (int): The flags to be used in the mode
+            offload_device (str): The device to which offload the program if any
             interface (str): The desired interface
             idx (int): The index of the interface
             program_type (str): The type of the program (Ingress/Egress)
@@ -545,11 +554,11 @@ class Controller(metaclass=Singleton):
         b = BPF(
             text=get_pivoting_code(
                 mode, program_type), cflags=get_cflags(
-                mode, program_type), debug=False)
-        f = b.load_func('handler', mode)
+                mode, program_type), debug=False, device=offload_device)
+        f = b.load_func('handler', mode, device=offload_device)
 
         if mode == BPF.XDP:
-            b.attach_xdp(interface, f)
+            b.attach_xdp(interface, f, flags=flags)
         else:
             # Checking if already created the class act for the interface
             if not self.__programs[idx][f'ingress_{mode_map_name}'] \
@@ -558,7 +567,7 @@ class Controller(metaclass=Singleton):
             self.__ip.tc("add-filter", "bpf", idx, ':1', fd=f.fd, name=f.name,
                          parent=parent, classid=1, direct_action=True)
         self.__programs[idx][f'{program_type}_{mode_map_name}'].append(
-            Program(interface, idx, mode, b))
+            Program(interface, idx, mode, b, b.load_func('handler', mode).fd))
 
     def __compile(self, config: ProbeConfig, plugin_cflags: List[str]) -> ProbeCompilation:
         """Internal Function to compile a probe and inject respective eBPF programs
@@ -574,18 +583,13 @@ class Controller(metaclass=Singleton):
         self.__logger.info(
             f'Compiling eBPF program {config.name}({config.plugin_name})')
 
-        link = self.__ip.link_lookup(ifname=config.interface)
         # Checking if the interface exists
-        if not link:
+        try:
+            idx = self.__ip.link_lookup(ifname=config.interface)[0]
+        except IndexError:
             self.__log_and_raise(
                 f'Interface {config.interface} not available',
                 UnknownInterfaceException)
-
-        idx = link[0]
-        # Checking if the interface has already been used so there's already
-        # Holder structure
-        if idx not in self.__programs:
-            self.__programs[idx] = InterfaceHolder(config.interface)
 
         # For ingress-egress
         for program_type in ["ingress", "egress"]:
@@ -595,19 +599,22 @@ class Controller(metaclass=Singleton):
                 continue
 
             # Retrieve eBPF values given Mode and program type
-            mode, mode_map_name, parent = get_bpf_values(
-                config.mode, program_type)
+            mode, flags, offload_device, mode_map_name, parent = get_bpf_values(
+                config.mode, config.flags, config.interface, program_type)
             map_of_interest = f'{program_type}_{mode_map_name}'
+
+            # Checking if the interface has already been used so there's already
+            # Holder structure
+            if idx not in self.__programs:
+                self.__programs[idx] = InterfaceHolder(
+                    config.interface, flags, offload_device)
+            elif program_type == "ingress":
+                flags, offload_device = self.__programs[idx].flags, self.__programs[idx].offload_device
 
             # If the array representing the hook is empty, inject the pivot code
             if not self.__programs[idx][map_of_interest]:
-                self.__inject_pivot(
-                    mode,
-                    config.interface,
-                    idx,
-                    program_type,
-                    mode_map_name,
-                    parent)
+                self.__inject_pivot(mode, flags, offload_device, config.interface,
+                                    idx, program_type, mode_map_name, parent)
 
             self.__logger.info(
                 f'Attaching program {config.name} to chain {program_type}, '
@@ -617,10 +624,22 @@ class Controller(metaclass=Singleton):
             original_code, swap_code, maps = swap_compile(
                 config[program_type])
             code_to_compile = original_code if not swap_code else get_swap_pivot()
-            cflags = plugin_cflags + get_cflags(mode,
-                                                program_type,
-                                                current_probes,
-                                                config.log_level)
+            cflags = plugin_cflags + \
+                get_cflags(mode, program_type,
+                           current_probes, config.log_level)
+
+            red_idx = None
+            if config.redirect and program_type == "ingress":
+                red_idx = self.__ip.link_lookup(ifname=config.redirect)[0]
+                cflags.append("-DNEED_REDIRECT=1")
+                if red_idx not in self.__programs:
+                    self.__programs[red_idx] = InterfaceHolder(
+                        config.redirect, flags, offload_device)
+                    self.__inject_pivot(
+                        mode, flags, offload_device, config.redirect, red_idx, program_type, mode_map_name, parent)
+                # TODO: Next instruction when needed? It always calls bpf_redirect...
+                self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][current_probes] = \
+                    ct.c_int(self.__programs[red_idx][map_of_interest][0].fd)
 
             # Compiling BPF given the formatted code, CFLAGS for the current Mode and CFLAGS
             # for the specific Plugin class if any
@@ -630,30 +649,31 @@ class Controller(metaclass=Singleton):
                     program_type,
                     code_to_compile),
                 debug=config.debug,
-                cflags=plugin_cflags + cflags)
+                cflags=plugin_cflags + cflags,
+                device=offload_device)
 
-            # Loading compiled "handle_ingress/handle_egress" function and set the previous
+            # Loading compiled "internal_handler" function and set the previous
             # plugin program to call in the CHAIN to the current function
             # descriptor
-            f = b.load_func('internal_handler', mode)
-            self.__programs[idx][map_of_interest][0][
-                f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(f.fd)
-            p = Program(config.interface, idx, mode, b, f.fd, current_probes)
+            p = Program(config.interface, idx, mode, b,
+                        b.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
+            if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
+                self.__programs[idx][map_of_interest][0][
+                    f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(p.fd)
+            ret[program_type] = p
             if swap_code:
                 b1 = BPF(text=get_formatted_code(mode, program_type, original_code),
                          debug=config.debug,
-                         cflags=plugin_cflags + cflags)
+                         cflags=cflags,
+                         device=offload_device)
                 b2 = BPF(text=get_formatted_code(mode, program_type, swap_code),
                          debug=config.debug,
-                         cflags=plugin_cflags + cflags)
-                f1 = b1.load_func('internal_handler', mode)
-                f2 = b2.load_func('internal_handler', mode)
+                         cflags=cflags,
+                         device=offload_device)
                 p1 = Program(config.interface, idx, mode,
-                             b1, f1.fd, current_probes)
+                             b1, b1.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
                 p2 = Program(config.interface, idx, mode,
-                             b2, f2.fd, current_probes)
+                             b2, b2.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
                 ret[program_type] = SwapStateCompile([p1, p2], p, maps)
-            else:
-                ret[program_type] = p
             self.__programs[idx][map_of_interest].append(p)
         return ret

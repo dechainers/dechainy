@@ -51,11 +51,11 @@ class CPThread(Thread):
 
     """
 
-    def __init__(self, target: Callable, args: tuple, time_window: int):
+    def __init__(self, target: Callable, args: tuple, time_window: float):
         super().__init__(target=target, args=args)
         self.__func: Callable = target
         self.__args: tuple = args
-        self.__timeout: int = time_window
+        self.__timeout: float = time_window
         self.__stop_event: Event = Event()
         self.daemon: bool = True
 

@@ -68,6 +68,7 @@ class Program:
         bpf (BPF): The eBPF compiled program
         fd (int): The file descriptor of the main function in the program. Defaults to None.
         probe_id (int): The ID of the probe. Defaults to 0.
+        red_idx (int): Index of the interface packets are redirect, if needed
         is_destroyed (bool): Boolean value set to True when the instance is destroyed
     """
 
@@ -78,14 +79,18 @@ class Program:
             mode: int,
             bpf: BPF,
             fd: int = None,
-            probe_id: int = 0):
+            probe_id: int = 0,
+            red_idx: int = 0):
         self.interface = interface
         self.idx = idx
         self.mode = mode
         self.fd = fd
         self.probe_id = probe_id
+        self.red_idx = red_idx
         self.__bpf = bpf
         self.__is_destroyed = False
+        if red_idx:
+            self.__bpf["DEVMAP"][ct.c_uint32(0)] = ct.c_int(red_idx)
 
     def __del__(self):
         if self.__is_destroyed:
@@ -191,8 +196,7 @@ with open(f'{__base_dir}/swap.c', 'r') as fp:
 
 
 # Variable to specify whether batch ops are supported (kernel >= v5.6)
-__is_batch_supp = run(
-    ['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('-')[1] >= '050600'
+__is_batch_supp = None
 
 ########################################################################
 #   #NOTE: generic/SKB (xdpgeneric), native/driver (xdp), and hardware offload (xdpoffload)
@@ -219,6 +223,7 @@ __TC_CFLAGS = [
 
 __XDP_CFLAGS = [
     f'-DCTXTYPE={BPF.XDP_STRUCT}',
+    f'-DBACK_TX={BPF.XDP_TX}',
     f'-DPASS={BPF.XDP_PASS}',
     f'-DDROP={BPF.XDP_DROP}',
     f'-DREDIRECT={BPF.XDP_REDIRECT}',
@@ -305,21 +310,23 @@ def get_formatted_code(
         __TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress" else __XDP_MAP_SUFFIX) + cloned
 
 
-def get_bpf_values(mode: int, program_type: str) -> Tuple[int, str, str]:
+def get_bpf_values(mode: int, flags: int, interface: str, program_type: str) -> Tuple[int, int, str, str, str]:
     """Function to return BPF map values according to ingress/egress and TC/XDP
 
     Args:
         mode (int): The program mode (XDP or TC)
+        flags (int): Flags to be used in the mode
+        interface (str): The interface to which attach the program
         program_type (str): The program hook (ingress/egress)
 
     Returns:
-        Tuple[int, str, str]: The values representing the mode, the suffix for maps names and parent interface
+        Tuple[int, int, str str, str]: The values representing the mode, the suffix for maps names and parent interface
     """
     if program_type == "egress":
-        return BPF.SCHED_CLS, __TC_MAP_SUFFIX, __PARENT_EGRESS_TC
+        return BPF.SCHED_CLS, 0, None, __TC_MAP_SUFFIX, __PARENT_EGRESS_TC
     if mode == BPF.SCHED_CLS:
-        return BPF.SCHED_CLS, __TC_MAP_SUFFIX, __PARENT_INGRESS_TC
-    return BPF.XDP, __XDP_MAP_SUFFIX, None
+        return BPF.SCHED_CLS, 0, None, __TC_MAP_SUFFIX, __PARENT_INGRESS_TC
+    return BPF.XDP, flags, interface if flags == (1 << 3) else None, __XDP_MAP_SUFFIX, None
 
 
 def get_cflags(
@@ -397,4 +404,8 @@ def is_batch_supp() -> bool:
     Returns:
         bool: True if they are supported, else otherwise
     """
+    global __is_batch_supp
+    if __is_batch_supp is None:
+        major, minor = [int(x) for x in run(['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('.')[:2]]
+        __is_batch_supp = True if major > 5 or (major == 5 and minor >= 6) else False
     return __is_batch_supp

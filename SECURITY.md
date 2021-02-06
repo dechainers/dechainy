@@ -2,11 +2,11 @@
 
 ## Supported Versions
 
-Here follows a listof the supported versions of the framework
+Here follows a list of the supported versions of the framework
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 1.0.x   | :white_check_mark: |
 
 ## Reporting a Vulnerability
 

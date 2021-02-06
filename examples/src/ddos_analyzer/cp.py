@@ -229,7 +229,7 @@ def reaction_function_rest(probe: Plugin) -> Dict[str, any]:
             "total_time": checkpoint_4 - checkpoint_0, "controls_time": checkpoint_1 - checkpoint_0,
             "prediction_time": checkpoint_4 - checkpoint_3, "ebpf_time": checkpoint_2 - checkpoint_1,
             "numpy_time": checkpoint_3 - checkpoint_2, "total_pkts": packets_list.shape[1] * packets_list.shape[0],
-            "ebpf_pkts": sum([len(x) for x in packets_map]), "total_sessions": len(ids_list)}
+            "ebpf_pkts": sum([len(x) for x in packets_map.values()]), "total_sessions": len(ids_list)}
 
 
 def reaction_function(probe: Plugin):

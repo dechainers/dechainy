@@ -67,7 +67,7 @@ class ClusterConfig(Dict):
 
     Attributes:
         probes (List[ProbeConfig]): List of probes componing the cluster. Default [].
-        time_window (int): periodic time to run the control plane function, if any. Default 10.
+        time_window (float): periodic time to run the control plane function, if any. Default 10.
         cp_function (str): The cluster Controlplane function. Default None.
         name (str): The name of the cluster. Default None.
     """
@@ -78,7 +78,7 @@ class ClusterConfig(Dict):
             obj = {}
         self.probes: List[ProbeConfig] = [ProbeConfig(
             x) for x in obj['probes']] if 'probes' in obj else []
-        self.time_window: int = obj['time_window'] if 'time_window' in obj else 10
+        self.time_window: float = obj['time_window'] if 'time_window' in obj else 10
         self.cp_function: str = obj['cp_function'] if 'cp_function' in obj else None
         # Following values are overwritten by Controller)
         self.name: str = obj['name'] if 'name' in obj else None
@@ -90,11 +90,13 @@ class ProbeConfig(Dict):
     Attributes:
         interface (str): The interface to which attach the program
         mode (int): The mode to insert the program (XDP or TC). Default TC.
-        time_window (int): Periodic time to locally call the Controlplane function, if any. Default 10.
+        flags (int): Flags for the mode, automatically computed.
+        time_window (float): Periodic time to locally call the Controlplane function, if any. Default 10.
         ingress (str): Code for the ingress hook. Default None.
         egress (str): Code for the egress hook. Default None.
         files (Dict[str, str]): Dictionary containing additional files for the probe. Default {}.
         debug (bool): True if the probe must be inserted in debug mode. Default False.
+        redirect(str): The name of the interface you want packets to be redirect as default action, else None
         plugin_name (str): The name of the plugin. Default None. (Set by Controller)
         name (str): The name of the probe. Default None. (Set by Controller)
         is_in_cluster (bool): True if the probe is inside a cluster. Default False. (Set by Controller)
@@ -111,13 +113,25 @@ class ProbeConfig(Dict):
             raise MissingInterfaceInProbeException(
                 'ProbeConfig needs an interface specified')
         self.interface: str = obj['interface']
-        self.mode: int = BPF.XDP if 'mode' in obj and obj['mode'] == "XDP" else BPF.SCHED_CLS
-        self.time_window: int = obj['time_window'] if 'time_window' in obj else 10
+        if 'mode' not in obj or obj['mode'] == 'TC':
+            self.mode: int = BPF.SCHED_CLS
+            self.flags: int = 0
+        elif obj['mode'] == 'XDP' or obj['mode'] == 'XDP_SKB':
+            self.mode: int = BPF.XDP
+            self.flags: int = (1 << 1)
+        elif obj['mode'] == 'XDP_DRV':
+            self.mode: int = BPF.XDP
+            self.flags: int = (1 << 2)
+        else:
+            self.mode = BPF.XDP
+            self.flags = (1 << 3)
+        self.time_window: float = obj['time_window'] if 'time_window' in obj else 10
         self.ingress: str = obj['ingress'] if 'ingress' in obj else None
         self.egress: str = obj['egress'] if 'egress' in obj else None
         self.cp_function: str = obj['cp_function'] if 'cp_function' in obj else None
         self.files: Dict[str, str] = obj['files'] if 'files' in obj else None
         self.debug: bool = obj['debug'] if 'debug' in obj else False
+        self.redirect: bool = obj['redirect'] if 'redirect' in obj else None
         self.log_level: int = DPLogLevel(
             obj['log_level']) if 'log_level' in obj else DPLogLevel.LOG_INFO
         # Following values are overwritten by Controller
@@ -177,15 +191,19 @@ class InterfaceHolder(Dict):
 
     Attributes:
         name (str): The name of the interface
+        flags (int): The flags used in injection
+        offload_device (str): The name of the device to which offload the program if any
         ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
         ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
         egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
         egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, flags: int, offload_device: str):
         super().__init__()
         self.name: str = name
+        self.flags = flags
+        self.offload_device = offload_device
         self.ingress_xdp: List[Program] = []
         self.ingress_tc: List[Program] = []
         self.egress_tc: List[Program] = []

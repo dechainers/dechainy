@@ -89,15 +89,6 @@ class BaseEntity:
         """
         return self.programs[key] if not self._is_destroyed else exit(1)
 
-    @staticmethod
-    def get_cflags() -> List[str]:
-        """Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
-
-        Returns:
-            List[str]: The list of cflags for the specified Plugin
-        """
-        return []
-
 
 class Cluster(BaseEntity):
     """Cluster entity class, to represent a group of probes.
@@ -163,6 +154,15 @@ class Plugin(BaseEntity):
             bool: True if supported, else otherwise
         """
         return False
+
+    @staticmethod
+    def get_cflags() -> List[str]:
+        """Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
+
+        Returns:
+            List[str]: The list of cflags for the specified Plugin
+        """
+        return []
 
 
 class Adaptmon(Plugin):
