@@ -94,6 +94,7 @@ class ProbeConfig(Dict):
         time_window (float): Periodic time to locally call the Controlplane function, if any. Default 10.
         ingress (str): Code for the ingress hook. Default None.
         egress (str): Code for the egress hook. Default None.
+        cflags (List[str]): List of Cflags to be used while compiling programs. Default [].
         files (Dict[str, str]): Dictionary containing additional files for the probe. Default {}.
         debug (bool): True if the probe must be inserted in debug mode. Default False.
         redirect(str): The name of the interface you want packets to be redirect as default action, else None
@@ -128,6 +129,7 @@ class ProbeConfig(Dict):
         self.time_window: float = obj['time_window'] if 'time_window' in obj else 10
         self.ingress: str = obj['ingress'] if 'ingress' in obj else None
         self.egress: str = obj['egress'] if 'egress' in obj else None
+        self.cflags: List[str] = obj['cflags'] if 'cflags' in obj else []
         self.cp_function: str = obj['cp_function'] if 'cp_function' in obj else None
         self.files: Dict[str, str] = obj['files'] if 'files' in obj else None
         self.debug: bool = obj['debug'] if 'debug' in obj else False

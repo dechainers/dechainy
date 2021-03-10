@@ -16,28 +16,31 @@
 # NB: Need the Docker image to be compiled with "ml" argument #
 ###############################################################
 import time
-import errno
-import ctypes as ct
+import os
 import numpy as np
 
 from multiprocessing.pool import ThreadPool
+from multiprocessing import Process
 from base64 import b64decode
-from os.path import isfile
 from collections import OrderedDict
-from typing import Dict, Tuple
-from bcc import lib
+from typing import Dict, List, Tuple
+from itertools import groupby
+
 from bcc.table import QueueStack, TableBase
-from keras.models import load_model
 
 from dechainy.utility import ipv4_to_string, port_to_host_int, protocol_to_string
 from dechainy.ebpf import is_batch_supp
 from dechainy.plugins import Plugin
+from dechainy.configurations import ProbeConfig
 
-# pool with 1 thread used to perform async packets retrieval
-pool = ThreadPool(processes=1)
+# execution number
+cnt = 0
 
-# the Neural Network model
-model = None
+# pool with 1 thread used to perform async session map erasion
+pool = ThreadPool()
+
+# the Neural Network model path
+model_path = None
 
 # range values of features (max - min) specified in feature_list
 rng = None
@@ -46,99 +49,111 @@ rng = None
 maxs = None
 
 # max packets per flow
-MAX_FLOW_LEN = 10
-
-# size of a batch lookup+delete
-BATCH_SIZE = 10000
+MAX_FLOW_LEN = None
 
 # feature list with min and max values (None has to be set at runtime)
+# NB: Keep the order as it is, it corresponds to the order of features in the trained model
+#     The unused features are removed in setup.
 feature_list = OrderedDict([
     ('timestamp', [0, None]),
-    ('IP_flags', [0, 65535]),
-    ('TCP_flags', [0, 65535]),
-    ('TCP_window_size', [0, 65535]),
-    ('UDP_length', [0, 65535]),
-    ('ICMP_type', [0, 255])]
+    ('ipFlagsFrag', [0, 65535]),
+    ('length', [0, 65535]),
+    ('tcpLen', [0, 65535]),
+    ('tcpAck', [0, 1 << 32]),
+    ('tcpFlags', [0, 65535]),
+    ('tcpWin', [0, 65535]),
+    ('udpLen', [0, 65535]),
+    ('icmpType', [0, 255])]
 )
 
+def async_prediction(packets: List[Tuple[Tuple[str, int, str, int, int], np.array]], exec_number, checkpoint_0, checkpoint_1, checkpoint_2, total_pkts_passed_from_sessions, compute_ids=False):
+    def normalize_and_padding_sample(sample: np.array, high: float = 1.0, low: float = 0.0) -> np.array:
+        """Function to normalize a samples and add padding if needed
 
-def normalize_and_padding(samples: np.array, high: float = 1.0, low: float = 0.0) -> np.array:
-    """Function to normalize the array of samples and add padding if needed
+        Args:
+            sample (np.array): A sample
+            high (float, optional): The upper bound. Defaults to 1.0.
+            low (float, optional): The lower bound. Defaults to 0.0.
 
-    Args:
-        samples (np.array): The list of samples
-        high (float, optional): The upper bound. Defaults to 1.0.
-        low (float, optional): The lower bound. Defaults to 0.0.
-
-    Returns:
-        np.array: The list of normalized values
-    """
-    global MAX_FLOW_LEN, maxs, rng
-    normalized_samples = []
-    for sample in samples:
+        Returns:
+            np.array: The normalized sample
+        """
+        global MAX_FLOW_LEN, maxs, rng, feature_list
         # if the sample is bigger than expected, we cut the sample
         if sample.shape[0] > MAX_FLOW_LEN:
             sample = sample[:MAX_FLOW_LEN, ...]
+        if "timestamp" in feature_list:
+            sample[:, 0] = (sample[:, 0] - sample[0][0]) / 1000000000
         # scale to linear bicolumn
         norm_sample = high - (((high - low) * (maxs - sample)) / rng)
         # padding
-        norm_sample = np.pad(norm_sample, ((
+        return np.pad(norm_sample, ((
             0, MAX_FLOW_LEN - sample.shape[0]), (0, 0)), 'constant', constant_values=(0, 0))
-        normalized_samples.append(norm_sample)
-    return np.array(normalized_samples)
+
+    global model_path
+    
+    import tensorflow as tf
+    from keras.models import load_model
+    
+    # Perform conversion, normalization and padding
+    checkpoint_3 = time.time()
+    if compute_ids:
+        ids_list = []
+        data = []
+        for k, v in groupby(sorted(packets, key=lambda x: (x.id.saddr, x.id.sport, x.id.daddr, x.id.dport, x.id.proto)), key=lambda x: (x.id.saddr, x.id.sport, x.id.daddr, x.id.dport, x.id.proto)):
+            ids_list.append((ipv4_to_string(k[0]),
+                port_to_host_int(k[1]),
+                ipv4_to_string(k[2]),
+                port_to_host_int(k[3]),
+                protocol_to_string(k[4])))
+            data.append(normalize_and_padding_sample(np.array([[getattr(x, a) for a in feature_list.keys()] for x in v])))
+    else:
+        data = [normalize_and_padding_sample(np.array([[getattr(x, a) for a in feature_list.keys()] for x in v])) for _, v in groupby(sorted(packets, key=lambda x: (x.id.saddr, x.id.sport, x.id.daddr, x.id.dport, x.id.proto)), key=lambda x: (x.id.saddr, x.id.sport, x.id.daddr, x.id.dport, x.id.proto))]
+    data = np.array(data)
+    data = np.expand_dims(data, axis=3)
+    #with tf.Graph().as_default():
+    model = load_model(model_path)
+    checkpoint_4 = time.time()
+    prediction = model.predict(data, batch_size=2048) > 0.5
+    checkpoint_5 = time.time()
+    
+    print(f"Execution n°{exec_number}:"
+        f"\n\tTIME total: {checkpoint_5 - checkpoint_0}"
+        f"\n\tTIME controls: {checkpoint_1 - checkpoint_0}"
+        f"\n\tTIME eBPF extraction: {checkpoint_2 - checkpoint_1}"
+        f"\n\tTIME spawning process: {checkpoint_3 - checkpoint_2}"
+        f"\n\tTIME async (Manipulation + Numpy): {checkpoint_4 - checkpoint_3}"
+        f"\n\tTIME prediction: {checkpoint_5 - checkpoint_4}"
+        f"\n\tMalicious Sessions: {np.sum(prediction)}"
+        f"\n\tTotal Sessions: {data.shape[0]}"
+        f"\n\tTotal Packets Extracted: {len(packets)}"
+        f"\n\tTotal Packets Padded: {data.shape[0]*data.shape[1] - len(packets)}"
+        f"\n\tTotal Packets passed belonging to tracked sessions: {total_pkts_passed_from_sessions}", flush=True)
 
 
-def extract_sessions_batch(table: TableBase) -> Dict[Tuple[str, int, str, int, int], Tuple[int]]:
-    """Function to extract values from sessions map using eBPF batch operations
+def extract_sessions(table: TableBase, return_map=False):
+    """Function to empty the session map, and return the dictionary if specified or the total amount of packets parsed from the eBPF program
 
     Args:
         table (TableBase): The table of interest
-
-    Returns:
-        Dict[Tuple[str,int,str,int,int], Tuple[int]]: Dictionary with session ID as key, and tuple holding
-            information concerning the session
     """
-    flows = {}
-    ret = 0
-    batch = ct.c_ulonglong(0)
-    count = ct.c_int(BATCH_SIZE)
-    keys = (table.Key * BATCH_SIZE)()
-    values = (table.Leaf * BATCH_SIZE)()
-    while not ret:
-        # Keep extracting+deleting values untill the map is empty
-        count = ct.c_int(BATCH_SIZE)
-        ret, last_errno = lib.bpf_map_lookup_and_delete_batch(
-            table.get_fd(),
-            ct.byref(batch), ct.byref(batch), keys, values, ct.byref(count), None), ct.get_errno()
-        if ret == 0 or (count.value != 0 and last_errno == errno.ENOENT):
-            for i in range(count.value):
-                key = keys[i]
-                val = values[i]
-                flow_id = (key.saddr, key.sport,
-                           key.daddr, key.dport, key.proto)
-                flows[flow_id] = (val.server_ip, val.n_packets)
-    return flows
+    if is_batch_supp():
+        data = table.items_lookup_and_delete_batch()
+        if return_map:
+            return {(k.saddr, k.sport, k.daddr, k.dport, k.proto): v for k, v in data}
+        return sum([v for _, v in data])
+    else:
+        flows = {} if return_map else 0
+        for key, val in table.items():
+            if return_map:
+                flows[(key.saddr, key.sport, key.daddr, key.dport, key.proto)] = val
+            else:
+                flows += val
+            del table[key]
+        return flows
+                
 
-
-def extract_sessions_normal(table: TableBase) -> Dict[Tuple[str, int, str, int, int], Tuple[int]]:
-    """Function to extract values from sessions map using eBPF sequential lookups
-
-    Args:
-        table (TableBase): The table of interest
-
-    Returns:
-        Dict[Tuple[str,int,str,int,int], Tuple[int]]: Dictionary with session ID as key, and tuple holding
-            information concerning the session
-    """
-    flows = {}
-    for key, val in table.items():
-        flow_id = (key.saddr, key.sport, key.daddr, key.dport, key.proto)
-        flows[flow_id] = (val.server_ip, val.n_packets)
-        del table[key]
-    return flows
-
-
-def extract_packets(queue: QueueStack) -> Dict[Tuple[str, int, str, int, int], np.array]:
+def extract_packets(queue: QueueStack) -> List[any]:
     """Function called asynchronously to retrieve all packets from the queue.
     Unfortunately, queue does not support batch operation, so iterative functions are used.
 
@@ -146,29 +161,15 @@ def extract_packets(queue: QueueStack) -> Dict[Tuple[str, int, str, int, int], n
         queue (QueueStack): The queue of interest
 
     Returns:
-        Dict[Tuple[str,int,str,int,int], np.array]: Dictionary with session ID as key, and tuple holding
-            the list of packets for that session
+        List[any]: The list of packets
     """
-    flows = {}
+    packets = []
     while True:
         try:
-            val = queue.pop()
-            features = [val.timestamp / 1000000000, val.ipFlagsFrag,
-                        val.tcpFlags, val.tcpWin, val.udpSize, val.icmpType]
-            flow_id = (val.id.saddr, val.id.sport,
-                       val.id.daddr, val.id.dport, val.id.proto)
-            if flow_id in flows:
-                flows[flow_id].append(features)
-            else:
-                flows[flow_id] = [features]
+            packets.append(queue.pop())
         except KeyError:
             break
-    for key, value in flows.items():
-        start_time = value[0][0]
-        np_sample = np.array(value)
-        np_sample[:, 0] -= start_time
-        flows[key] = np_sample
-    return flows
+    return packets
 
 
 def reaction_function_rest(probe: Plugin) -> Dict[str, any]:
@@ -180,89 +181,69 @@ def reaction_function_rest(probe: Plugin) -> Dict[str, any]:
     Returns:
         Dict[str, any]: Dictionary containing times and results of prediction
     """
-    global model
-
+    global cnt
+    
     checkpoint_0 = time.time()
-
-    probe["ingress"].trigger_read()
-    probe["egress"].trigger_read()
-
-    # Extract asynchronously from the Queue
-    async_result = pool.apply_async(
-        extract_packets, (probe["ingress"]["PACKET_BUFFER_DDOS"],))
+    
+    exec_number = cnt
+    cnt += 1
+    if probe._config.ingress: 
+        probe["ingress"].trigger_read()
+    if probe._config.egress: 
+        probe["egress"].trigger_read()
+    task = pool.apply_async(extract_sessions, (probe["ingress"]["SESSIONS_TRACKED_DDOS"],))
 
     checkpoint_1 = time.time()
-
-    # Extract from the Hash map
-    flows = extract_sessions_batch(
-        probe["ingress"]["SESSIONS_TRACKED_DDOS"]) if is_batch_supp() \
-        else extract_sessions_normal(probe["ingress"]["SESSIONS_TRACKED_DDOS"])
-
-    ids_list = []
-    # While waiting for the Queue to be extracted, parse Sessions IDs into human-readable
-    for key, value in flows.items():
-        correct_key = key
-        if key[0] == value[0]:
-            correct_key = (key[2], key[3], key[0], key[1], key[4])
-        ids_list.append((
-            ipv4_to_string(correct_key[0]),
-            port_to_host_int(correct_key[1]),
-            ipv4_to_string(correct_key[2]),
-            port_to_host_int(correct_key[3]),
-            protocol_to_string(correct_key[4])
-        ))
-
-    packets_map = async_result.get()
+    packets = extract_packets(probe["ingress"]["PACKET_BUFFER_DDOS"])
+    total_pkts_passed_from_sessions = task.get()
     checkpoint_2 = time.time()
 
-    if not packets_map:
-        return None
-
-    # Perform conversion, normalization and padding
-    packets_list = [packets_map[key] for key in flows.keys()]
-    packets_list = normalize_and_padding(packets_list)
-    packets_list = np.expand_dims(packets_list, axis=3)
-    checkpoint_3 = time.time()
-    predictions = model.predict(packets_list, batch_size=2048) > 0.5
-    checkpoint_4 = time.time()
-    return {"flows": [x + (p[0],) for x, p in zip(ids_list, predictions)],
-            "total_time": checkpoint_4 - checkpoint_0, "controls_time": checkpoint_1 - checkpoint_0,
-            "prediction_time": checkpoint_4 - checkpoint_3, "ebpf_time": checkpoint_2 - checkpoint_1,
-            "numpy_time": checkpoint_3 - checkpoint_2, "total_pkts": packets_list.shape[1] * packets_list.shape[0],
-            "ebpf_pkts": sum([len(x) for x in packets_map.values()]), "total_sessions": len(ids_list)}
+    if packets:
+        Process(target=async_prediction, args=(packets, exec_number, checkpoint_0, checkpoint_1, checkpoint_2, total_pkts_passed_from_sessions,), daemon=True).start()
+        return True
+    return False
 
 
 def reaction_function(probe: Plugin):
-    ret = reaction_function_rest(probe)
-    if ret:
-        print(
-            'Got something!\n\t'
-            f'TIME total: {ret["total_time"]} (s)\n\t'
-            f'TIME controls: {ret["controls_time"]}\n\t'
-            f'TIME ebpf extraction + parse: {ret["ebpf_time"]} (s)\n\t'
-            f'TIME numpy padding and normalize: {ret["numpy_time"]} (s)\n\t'
-            f'TIME prediction: {ret["prediction_time"]} (s)\n\t'
-            f'Total Sessions: {ret["total_sessions"]}\n\t'
-            f'Total Packets: {ret["total_pkts"]}'
-            f'Total Packets not padded: {ret["ebpf_pkts"]}', flush=True)
-    else:
-        print('Got nothing!', flush=True)
+    global cnt
+    print(f'Execution n° {cnt}: {"Got something (asynchronously prediction)" if reaction_function_rest(probe) else "Got nothing!"}!', flush=True)
 
 
-def setup(probe: Plugin):
-    global model, maxs, rng, feature_list
-
-    if 'model' not in probe._config.files:
+def pre_compilation(config: ProbeConfig):
+    global feature_list, model_path, MAX_FLOW_LEN
+    
+    if 'model' not in config.files:
         raise Exception("No Model has been specified")
 
-    path = probe._config.files['model']
-    if not isfile(path):
-        content = path
-        path = "/tmp/model"
-        with open(path, "wb+") as fp:
+    # Storing the model into a temporary file
+    model_path = config.files['model']
+    if not os.path.isfile(model_path):
+        content = model_path
+        model_path = "/tmp/model"
+        with open(model_path, "wb+") as fp:
             fp.write(b64decode(content))
-    model = load_model(path)
 
-    feature_list['timestamp'][1] = probe._config.time_window
+    # adjust time_window max value in features
+    feature_list['timestamp'][1] = config.time_window
+
+    # set default features active
+    if not config.cflags:
+        config.cflags = ["-DTIMESTAMP=1", "-DIP_FLAGS=1", "-DTCP_FLAGS=1", "-DTCP_WIN=1", "-DUDP_LEN=1", "-DICMP_TYPE=1"]
+    
+    # check if changed N_PACKET_PER_SESSION and adjust parameter
+    has_declared_pps = [int(x.split("=")[1]) for x in config.cflags if "N_PACKET_PER_SESSION" in x]
+    MAX_FLOW_LEN = has_declared_pps[0] if has_declared_pps else 10        
+
+
+def post_compilation(probe: Plugin):
+    global maxs, rng, feature_list
+    
+    # remove unused features
+    active_features = [x for x, _ in probe["ingress"]
+                       ["PACKET_BUFFER_DDOS"].Leaf._fields_]
+    for key in list(feature_list.keys()):
+        if key not in active_features:
+            feature_list.pop(key)
+
     rng = np.array([x[1] - x[0] for x in feature_list.values()])
     maxs = np.array([x[1] for x in feature_list.values()])

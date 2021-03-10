@@ -21,13 +21,42 @@ A complete list of features extracted is:
 * udpSize: the size of the UDP packet
 * icmpType: the type of the ICMP packet
 
-Obviously, the features are not all active at the same time, since different protocols extracts different data.
+Obviously, the features are not all active at the same time, since different protocols extracts different data. Features can be activated or deactivated by inserting specific cflags in the probe configuration (see [ebpf.c](ebpf.c) for possible values).
 
 Whenever a new packet is analyzed, the programs checks whether the current session identifying the packet has already registered a maximum amount of packets, to avoid that only a specific flow fills the queue. If the packet can be registered, then, depending on the protocol used, the set of features is extracted.
 
 ## Control Plane
 
-The Control Plane periodically atomically reads both the SESSIONS_TRACKED_DDOS and PACKETS_BUFFER maps, and aggregates results per-flow. It pads the results and normalizes them in order to produce the correct data to fill the neural network. Once the prediction is performed, each flow is tagged with the result (malicious/benign) and returned to the user.
+The Control Plane periodically atomically reads the PACKETS_BUFFER map and erase the content of SESSIONS_TRACKED_DDOS, in order to be able to start monitoring new sessions once the program has been swapped back. Then, asynchronously manipulate and trasform such data, in order to feed the neural network provided. More in details: 
+
+* Packets are grouped in arrays for each flow
+* Packets' values are normalized
+* If needed, the arrays are padded in order to fill the number of packets per flow required by the network
+
+## Neural Network model
+
+A neural network model can be provided in the configuration of the probe as:
+
+* text: using the [formatter.py](../../scripts/formatter.py) script
+* path: the path to the model
+
+The probe configuration must be as follows:
+
+```bash
+{
+    "probes": [
+        {
+            ...
+            "ingress": ...,
+            "egress": ...,
+            "cp_function": ...,
+            "files": {
+                "model": <put here the value>
+            }
+        }
+    ]
+}
+```
 
 ## Acknowledgement
 

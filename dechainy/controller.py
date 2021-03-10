@@ -256,6 +256,8 @@ class Controller(metaclass=Singleton):
         if conf.cp_function:
             module = ModuleType(f'{plugin_name}_{probe_name}')
             exec(conf.cp_function, module.__dict__)
+            if hasattr(module, "pre_compilation"):
+                module.pre_compilation(conf)
         comp = self.__compile(
             conf, self.__declarations[plugin_name].class_declaration.get_cflags())
         prb = self.__declarations[plugin_name].class_declaration(
@@ -345,6 +347,8 @@ class Controller(metaclass=Singleton):
         if conf.cp_function:
             module = ModuleType(cluster_name)
             exec(conf.cp_function, module.__dict__)
+            if hasattr(module, "pre_compilation"):
+                module.pre_compilation(conf)
         self.__clusters[cluster_name] = plugins.Cluster(
             conf, module, cluster_comp)
         self.__logger.info(f'Successfully created Cluster {cluster_name}')
@@ -624,7 +628,7 @@ class Controller(metaclass=Singleton):
             original_code, swap_code, maps = swap_compile(
                 config[program_type])
             code_to_compile = original_code if not swap_code else get_swap_pivot()
-            cflags = plugin_cflags + \
+            cflags = plugin_cflags + config.cflags +\
                 get_cflags(mode, program_type,
                            current_probes, config.log_level)
 
@@ -649,7 +653,7 @@ class Controller(metaclass=Singleton):
                     program_type,
                     code_to_compile),
                 debug=config.debug,
-                cflags=plugin_cflags + cflags,
+                cflags=cflags,
                 device=offload_device)
 
             # Loading compiled "internal_handler" function and set the previous

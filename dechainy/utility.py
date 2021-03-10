@@ -80,7 +80,7 @@ def remove_c_comments(text: str) -> str:
         str: the string sanitized from comments
     """
     return sub(r"""(?:\/\/(?:\\\n|[^\n])*\n)|(?:\/\*[\s\S]*?\*\/)|((?:R"([^(\\\s]{0,16})\([^)]*\)\2")|"""
-               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1", text)
+               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1\n", text)
 
 
 # Simple dictionary containing protocol names and their integer value

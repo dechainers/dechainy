@@ -46,9 +46,9 @@ class BaseEntity:
         self._module: ModuleType = module
         self._config: Union[ProbeConfig, ClusterConfig] = config
         self.programs: Union[ProbeCompilation, ClusterCompilation] = programs
-        # If the module has a setup function, call it
-        if hasattr(module, "setup"):
-            module.setup(self)
+        # If the module has a post_compilation function, call it
+        if hasattr(module, "post_compilation"):
+            module.post_compilation(self)
         # If required, run local thread to execute non-REST function
         if hasattr(module, "reaction_function"):
             self._thread = CPThread(
