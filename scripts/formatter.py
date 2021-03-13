@@ -22,7 +22,7 @@ def main():
     args = parseArguments()
     path = args['path_to_file']
     # try to guess file type
-    file_type = subprocess.run(['file', '-b', '--mime-type', path], capture_output=True).stdout.decode('utf-8')
+    file_type = subprocess.run(['file', '-b', '--mime-type', path], stdout=subprocess.PIPE).stdout.decode('utf-8')
     # if binary (e.g., machine learning model in .h5 format), then open it in "rb" mode and base64-encode it
     mode = 'r' if any(x in file_type for x in ['x-python', 'x-c']) or ".py" in path or ".c" in path else 'rb'
     with open(path, mode) as fp:

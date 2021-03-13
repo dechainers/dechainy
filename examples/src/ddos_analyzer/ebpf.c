@@ -40,25 +40,25 @@ struct features {
     uint16_t length;                                //IP length value
 #endif
 #ifdef IP_FLAGS
-    uint16_t ipFlagsFrag;                           //IP flags
+    uint16_t ip_flags;                           //IP flags
 #endif
 #ifdef TCP_LEN
-    uint16_t tcpLen;                                //TCP payload length
+    uint16_t tcp_len;                                //TCP payload length
 #endif
 #ifdef TCP_ACK
-    uint32_t tcpAck;                                //TCP ack n°
+    uint32_t tcp_ack;                                //TCP ack n°
 #endif
 #ifdef TCP_FLAGS
-    uint8_t tcpFlags;                               //TCP flags
+    uint8_t tcp_flags;                               //TCP flags
 #endif
 #ifdef TCP_WIN
-    uint16_t tcpWin;                                //TCP window value
+    uint16_t tcp_win;                                //TCP window value
 #endif
 #ifdef UDP_LEN
-    uint8_t udpLen;                                //UDP payload length
+    uint8_t udp_len;                                //UDP payload length
 #endif
 #ifdef ICMP_TYPE
-    uint8_t icmpType;                               //ICMP operation type
+    uint8_t icmp_type;                               //ICMP operation type
 #endif
 } __attribute__((packed));
 
@@ -137,19 +137,19 @@ static __always_inline int handler(struct CTXTYPE *ctx, struct pkt_metadata *md)
        .timestamp=get_time_epoch(), 
 #endif
 #ifdef IP_FLAGS
-        .ipFlagsFrag=ip->frag_off,
+        .ip_flags=ip->frag_off,
 #endif
 #ifdef TCP_ACK
-        .tcpAck=tcp->ack_seq,
+        .tcp_ack=tcp->ack_seq,
 #endif
 #ifdef TCP_WIN
-        .tcpWin=tcp->window, 
+        .tcp_win=tcp->window, 
 #endif
 #ifdef TCP_LEN
-        .tcpLen=(uint16_t)(bpf_ntohs(ip->tot_len) - ip_header_len - sizeof(*tcp)),
+        .tcp_len=(uint16_t)(bpf_ntohs(ip->tot_len) - ip_header_len - sizeof(*tcp)),
 #endif
 #ifdef TCP_FLAGS
-        .tcpFlags=(tcp->cwr << 7) | (tcp->ece << 6) | (tcp->urg << 5) | (tcp->ack << 4)
+        .tcp_flags=(tcp->cwr << 7) | (tcp->ece << 6) | (tcp->urg << 5) | (tcp->ack << 4)
                 | (tcp->psh << 3)| (tcp->rst << 2) | (tcp->syn << 1) | tcp->fin,
 #endif
         .id=key
@@ -188,10 +188,10 @@ static __always_inline int handler(struct CTXTYPE *ctx, struct pkt_metadata *md)
         .timestamp=get_time_epoch(), 
 #endif
 #ifdef IP_FLAGS
-        .ipFlagsFrag=ip->frag_off,
+        .ip_flags=ip->frag_off,
 #endif
 #ifdef ICMP_TYPE
-        .icmpType=icmp->type,
+        .icmp_type=icmp->type,
 #endif
         .id=key
       };
@@ -229,10 +229,10 @@ static __always_inline int handler(struct CTXTYPE *ctx, struct pkt_metadata *md)
         .timestamp=get_time_epoch(), 
 #endif
 #ifdef IP_FLAGS
-        .ipFlagsFrag=ip->frag_off,
+        .ip_flags=ip->frag_off,
 #endif
 #ifdef UDP_LEN
-        .udpLen=bpf_ntohs(udp->len) - sizeof(*udp),
+        .udp_len=bpf_ntohs(udp->len) - sizeof(*udp),
 #endif
         .id=key
       };

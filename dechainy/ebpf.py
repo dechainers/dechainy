@@ -130,6 +130,7 @@ class SwapStateCompile:
     """
 
     def __init__(self, programs: List[Program], pivot: Program, maps: List[str]):
+        self.__is_destroyed = False
         self.__maps: List[str] = maps
         self.__index: int = 0
         self.__programs: List[Program] = programs
@@ -137,8 +138,18 @@ class SwapStateCompile:
         self.__pivot['ACTIVE_PROGRAM'][0] = ct.c_int(
             self.__programs[self.__index].fd)
 
+    def __del__(self):
+        if self.__is_destroyed:
+            return
+        self.__is_destroyed = True
+        del self.__programs[0]
+        del self.__programs[1]
+        self.__programs = []
+
     def trigger_read(self):
         """Method to trigger the read of the maps, meaning to swap in and out the programs"""
+        if self.__is_destroyed:
+            exit(1)
         self.__index = (self.__index + 1) % 2
         self.__pivot['ACTIVE_PROGRAM'][0] = ct.c_int(
             self.__programs[self.__index].fd)
@@ -152,6 +163,8 @@ class SwapStateCompile:
         Returns:
             any: The value corresponding to the provided key
         """
+        if self.__is_destroyed:
+            exit(1)
         index_to_read = int(not self.__index)
         if index_to_read == 1 and key in self.__maps:
             key += "_1"
