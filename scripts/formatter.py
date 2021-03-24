@@ -28,6 +28,11 @@ def main():
     with open(path, mode) as fp:
         content = dumps(fp.read()) if mode == 'r' else base64.b64encode(fp.read())
     print(content)
+    try:
+        import pyperclip
+        pyperclip.copy(content)
+    except ImportError:
+        pass
 
 
 def parseArguments():

@@ -15,7 +15,7 @@ from atexit import register
 from logging import getLogger, INFO, StreamHandler, Formatter
 from threading import Thread
 from types import ModuleType
-from typing import Dict, List
+from typing import Dict, List, Union
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
 from bcc import BPF
@@ -24,11 +24,10 @@ import ctypes as ct
 
 from .exceptions import UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
-    get_pivoting_code, get_startup_code, Program, Metadata, swap_compile, get_swap_pivot, \
-    SwapStateCompile
-from .configurations import ClusterConfig, PluginConfig, ProbeConfig, \
-    InterfaceHolder, ProbeCompilation, ClusterCompilation
-from .plugins import Cluster, Plugin
+    get_pivoting_code, get_startup_code, swap_compile, \
+    Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
+from .configurations import ClusterConfig, PluginConfig, ProbeConfig
+from .plugins import Adaptmon, Cluster, Plugin
 from .utility import Singleton
 from . import exceptions
 from . import plugins
@@ -476,11 +475,11 @@ class Controller(metaclass=Singleton):
         self.__logger.info(
             f'CP handle packet from Probe {skb_event.metadata.probe_id} CPU({cpu}) PType({skb_event.metadata.ptype})')
 
-    def __remove_probe_programs(self, conf: ProbeCompilation):
+    def __remove_probe_programs(self, conf: Union[ProbeCompilation, SwapStateCompile]):
         """Method to remove the programs associated to a specific probe
 
         Args:
-            conf (ProbeCompilation): The object containing the programs
+            conf (Union[ProbeCompilation, SwapStateCompile]): The object containing the programs
         """
         types = ["ingress", "egress"]
         self.__logger.info('Deleting Probe programs')
@@ -625,9 +624,8 @@ class Controller(metaclass=Singleton):
                 f'interface {config.interface}, mode {mode_map_name}')
             current_probes = len(self.__programs[idx][map_of_interest])
 
-            original_code, swap_code, maps = swap_compile(
-                config[program_type])
-            code_to_compile = original_code if not swap_code else get_swap_pivot()
+            original_code, swap_code = swap_compile(config[program_type], config[f"{program_type}_metrics"]) if config.plugin_name == Adaptmon.__name__ else config[program_type], None
+
             cflags = plugin_cflags + config.cflags +\
                 get_cflags(mode, program_type,
                            current_probes, config.log_level)
@@ -651,7 +649,7 @@ class Controller(metaclass=Singleton):
                 text=get_formatted_code(
                     mode,
                     program_type,
-                    code_to_compile),
+                    original_code),
                 debug=config.debug,
                 cflags=cflags,
                 device=offload_device)
@@ -661,23 +659,17 @@ class Controller(metaclass=Singleton):
             # descriptor
             p = Program(config.interface, idx, mode, b,
                         b.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
+            ret[program_type] = p
             if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
                 self.__programs[idx][map_of_interest][0][
                     f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(p.fd)
-            ret[program_type] = p
             if swap_code:
-                b1 = BPF(text=get_formatted_code(mode, program_type, original_code),
-                         debug=config.debug,
-                         cflags=cflags,
-                         device=offload_device)
-                b2 = BPF(text=get_formatted_code(mode, program_type, swap_code),
+                b1 = BPF(text=get_formatted_code(mode, program_type, swap_code),
                          debug=config.debug,
                          cflags=cflags,
                          device=offload_device)
                 p1 = Program(config.interface, idx, mode,
                              b1, b1.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
-                p2 = Program(config.interface, idx, mode,
-                             b2, b2.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
-                ret[program_type] = SwapStateCompile([p1, p2], p, maps)
+                ret[program_type] = SwapStateCompile([p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'], [x.map_name for x in config[f"{program_type}_metrics"] if x.swap_on_read])
             self.__programs[idx][map_of_interest].append(p)
         return ret

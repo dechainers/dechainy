@@ -11,15 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ctypes as ct
+
 from math import ceil
 from types import ModuleType
 from typing import List, Union
 from json import dumps
-import ctypes as ct
 
 from .exceptions import HookDisabledException
-from .configurations import ClusterCompilation, ClusterConfig, FirewallRule, MitigatorRule, ProbeCompilation, ProbeConfig
-from .ebpf import BPF, LpmKey, Program
+from .configurations import ClusterConfig, FirewallRule, MitigatorRule, ProbeConfig
+from .ebpf import BPF, LpmKey, Program, SwapStateCompile, ProbeCompilation, ClusterCompilation, is_batch_supp
 from .utility import Dict, CPThread, protocol_to_int, ipv4_to_network_int, port_to_network_int
 
 
@@ -171,6 +172,76 @@ class Adaptmon(Plugin):
     @staticmethod
     def is_programmable():
         return True
+
+    def retrieve_metric(self, program_type: str, metric_name: str) -> any:
+        """Function to retrieve the value of a specific metric.
+
+        Args:
+            program_type (str): The program type (Ingress/Egress)
+            metric_name (str): The name of the metric.
+
+        Returns:
+            any: The value of the metric.
+        """
+        self._check_hook_active(program_type)
+
+        if isinstance(self.programs[program_type], SwapStateCompile):
+            self.programs[program_type].trigger_read()
+        
+        metric_ref = next(x for x in self._config[f"{program_type}_metrics"] if x.map_name == metric_name)
+        map_ref = self.programs[program_type][metric_name]
+        ret = {}
+
+        if is_batch_supp():
+            try:
+                for k, v in map_ref.items_lookup_and_delete_batch() if metric_ref.empty_on_read else map_ref.items_lookup_batch():
+                    ret[k.value] = v.value
+            except Exception:
+                # TODO: Check for update before exception
+                print("Sono in exception")
+                pass
+        
+        if not ret:
+            for k, v in map_ref.items():
+                ret[k.value] = v.value
+                if metric_ref.empty_on_read:
+                    del map_ref[k]
+        return ret
+
+    def retrieve_metrics(self, program_type: str) -> any:
+        """Function to retrieve the value of a all metrics.
+
+        Args:
+            program_type (str): The program type (Ingress/Egress)
+
+        Returns:
+            any: The value of the metrics.
+        """
+        self._check_hook_active(program_type)
+
+        if isinstance(self.programs[program_type], SwapStateCompile):
+            self.programs[program_type].trigger_read()
+        
+        ret = {}
+        for metric_ref in self._config[f"{program_type}_metrics"]:
+            map_ref = self.programs[program_type][metric_ref.map_name]
+            tmp = {}
+            if is_batch_supp():
+                try:
+                    for k, v in map_ref.items_lookup_and_delete_batch() if metric_ref.empty_on_read else map_ref.items_lookup_batch():
+                        tmp[k.value] = v.value
+                except Exception:
+                    # TODO: Check for update before exception
+                    print("Sono in exception")
+                    pass
+                
+            if not tmp:
+                for k, v in map_ref.items():
+                    tmp[k.value] = v.value
+                    if metric_ref.empty_on_read:
+                        del map_ref[k]
+            ret[metric_ref.map_name] = tmp
+        return ret
 
 
 class Mitigator(Plugin):

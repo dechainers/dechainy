@@ -43,9 +43,9 @@ struct session_key {
 
 /*Tracked session map*/
 #if PTYPE == 0
-BPF_TABLE_SHARED("percpu_hash", struct session_key, struct features, SESSIONS_TRACKED_CRYPTO, N_SESSION)__attribute((SWAP));
+BPF_TABLE_SHARED("percpu_hash", struct session_key, struct features, SESSIONS_TRACKED_CRYPTO, N_SESSION);
 #else
-BPF_TABLE("extern", struct session_key, struct features, SESSIONS_TRACKED_CRYPTO, N_SESSION)__attribute((SWAP));
+BPF_TABLE("extern", struct session_key, struct features, SESSIONS_TRACKED_CRYPTO, N_SESSION);
 #endif
 
 /*Method to return the session identifier, with the lower IP as first member*/

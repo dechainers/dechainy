@@ -11,14 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Callable, List, Union
-from types import ModuleType
+from enum import Enum
+from typing import Callable, List
 from logging import INFO
 from bcc import BPF
 
-from .ebpf import DPLogLevel, Program, SwapStateCompile
 from .exceptions import MissingInterfaceInProbeException
 from .utility import Dict
+
+
+class DPLogLevel(Enum):
+    """Class to represent the log level of a datapath program."""
+    LOG_OFF = 0
+    LOG_INFO = 1
+    LOG_DEBUG = 2
+    LOG_WARN = 3
+    LOG_ERR = 4
 
 
 class AppConfig(Dict):
@@ -84,6 +92,20 @@ class ClusterConfig(Dict):
         self.name: str = obj['name'] if 'name' in obj else None
 
 
+class MetricConfig:
+    #TODO: write Doc
+    def __init__(self, obj: dict = None) -> None:
+        if not obj:
+            obj = {}
+        if not "map_name" in obj:
+            raise AttributeError("Need to provide the name of the underlying map")
+        self.name = obj["name"] if "name" in obj else None
+        self.map_name = obj["map_name"]
+        self.description = obj["description"] if "description" in obj else None
+        self.swap_on_read = obj["swap_on_read"] if "swap_on_read" in obj else False
+        self.empty_on_read = obj["empty_on_read"] if "empty_on_read" in obj else False
+
+
 class ProbeConfig(Dict):
     """Class to represent a Probe configuration.
 
@@ -132,6 +154,8 @@ class ProbeConfig(Dict):
         self.cflags: List[str] = obj['cflags'] if 'cflags' in obj else []
         self.cp_function: str = obj['cp_function'] if 'cp_function' in obj else None
         self.files: Dict[str, str] = obj['files'] if 'files' in obj else None
+        self.ingress_metrics: List[MetricConfig] = [MetricConfig(x) for x in obj['ingress_metrics']] if 'ingress_metrics' in obj else []
+        self.egress_metrics:  List[MetricConfig] = [MetricConfig(x) for x in obj['egress_metrics']] if 'egress_metrics' in obj else []
         self.debug: bool = obj['debug'] if 'debug' in obj else False
         self.redirect: bool = obj['redirect'] if 'redirect' in obj else None
         self.log_level: int = DPLogLevel(
@@ -160,56 +184,6 @@ class PluginConfig(Dict):
         self.class_declaration: Callable = class_declaration
         self.ingress: str = ingress_code
         self.egress: str = egress_code
-
-
-class ProbeCompilation(Dict):
-    """Class representing the compilation object of a Probe
-
-    Attributes:
-        cp_function (ModuleType): The module containing the optional Controlplane functions
-        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
-        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.cp_function: ModuleType = None
-        self.ingress: Union[Program, SwapStateCompile] = None
-        self.egress: Union[Program, SwapStateCompile] = None
-
-
-class ClusterCompilation(Dict):
-    """Class to represent a compilation of a Cluster object.
-
-    Attributes:
-        key (str): The name of the plugin
-        value (List[Plugin]): List of probes for that specific plugin
-    """
-    pass
-
-
-class InterfaceHolder(Dict):
-    """Simple class to store information concerning the programs attached to an interface
-
-    Attributes:
-        name (str): The name of the interface
-        flags (int): The flags used in injection
-        offload_device (str): The name of the device to which offload the program if any
-        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
-        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
-        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
-        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
-    """
-
-    def __init__(self, name: str, flags: int, offload_device: str):
-        super().__init__()
-        self.name: str = name
-        self.flags = flags
-        self.offload_device = offload_device
-        self.ingress_xdp: List[Program] = []
-        self.ingress_tc: List[Program] = []
-        self.egress_tc: List[Program] = []
-        self.egress_xdp: List[Program] = []
 
 
 class FirewallRule(Dict):

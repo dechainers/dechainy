@@ -64,11 +64,11 @@ struct features {
 
 /*Queue containing only packets to userspace, hash to store total number of packets for each session*/
 #if PTYPE == 0
-BPF_QUEUESTACK_SHARED("queue", PACKET_BUFFER_DDOS, struct features, N_SESSION * N_PACKET_PER_SESSION, 0)__attribute((SWAP));
-BPF_TABLE_SHARED("hash", struct session_key, uint64_t, SESSIONS_TRACKED_DDOS, N_SESSION)__attribute((SWAP));
+BPF_QUEUESTACK_SHARED("queue", PACKET_BUFFER_DDOS, struct features, N_SESSION * N_PACKET_PER_SESSION, 0);
+BPF_TABLE_SHARED("hash", struct session_key, uint64_t, SESSIONS_TRACKED_DDOS, N_SESSION);
 #else
-BPF_QUEUESTACK("extern", PACKET_BUFFER_DDOS, struct features, N_SESSION * N_PACKET_PER_SESSION, 0)__attribute((SWAP));
-BPF_TABLE("extern", struct session_key, uint64_t, SESSIONS_TRACKED_DDOS, N_SESSION)__attribute((SWAP));
+BPF_QUEUESTACK("extern", PACKET_BUFFER_DDOS, struct features, N_SESSION * N_PACKET_PER_SESSION, 0);
+BPF_TABLE("extern", struct session_key, uint64_t, SESSIONS_TRACKED_DDOS, N_SESSION);
 #endif
 
 /*Method to return the session identifier, with the lower IP as first member*/

@@ -13,18 +13,19 @@
 # limitations under the License.
 import time
 import ctypes as ct
-from enum import Enum
 
 from os.path import dirname
 from re import finditer, MULTILINE
 from subprocess import run, PIPE
-from typing import List, Tuple, Union
+from typing import Dict, List, Tuple, Union
+from atexit import unregister
+from types import ModuleType
+
 from bcc import BPF
 from bcc.table import QueueStack, TableBase
-from atexit import unregister
 
-from .utility import remove_c_comments
-
+from .utility import remove_c_comments, Dict as Dict_
+from .configurations import DPLogLevel, MetricConfig
 
 class Metadata(ct.Structure):
     """C struct representing the pkt_metadata structure in Data Plane programs
@@ -87,10 +88,10 @@ class Program:
         self.fd = fd
         self.probe_id = probe_id
         self.red_idx = red_idx
-        self.__bpf = bpf
+        self.bpf = bpf
         self.__is_destroyed = False
         if red_idx:
-            self.__bpf["DEVMAP"][ct.c_uint32(0)] = ct.c_int(red_idx)
+            self.bpf["DEVMAP"][ct.c_uint32(0)] = ct.c_int(red_idx)
 
     def __del__(self):
         if self.__is_destroyed:
@@ -98,9 +99,9 @@ class Program:
         # Calling the BCC defined cleanup function which would have been
         # called while exitting
         self.__is_destroyed = True
-        unregister(self.__bpf.cleanup)
-        self.__bpf.cleanup()
-        del self.__bpf
+        unregister(self.bpf.cleanup)
+        self.bpf.cleanup()
+        del self.bpf
 
     def __getitem__(self, key: str) -> Union[QueueStack, TableBase]:
         """Function to access directly the BPF map providing a key
@@ -111,7 +112,7 @@ class Program:
         Returns:
             Union[QueueStack, TableBase]: The eBPF map requested
         """
-        return self.__bpf[key] if not self.__is_destroyed else exit(1)
+        return self.bpf[key] if not self.__is_destroyed else exit(1)
 
 
 class SwapStateCompile:
@@ -126,18 +127,18 @@ class SwapStateCompile:
         maps (List[str]): The maps defined as swappable
         index (int): The index of the current active program
         programs (List[Program]): The list containing the two programs compiled
-        pivot (Program): The pivoting eBPF program compiled
+        chain_map (TableBase): The eBPF table performing the chain
+        programs_id (int): The probe ID of the programs
     """
 
-    def __init__(self, programs: List[Program], pivot: Program, maps: List[str]):
+    def __init__(self, programs: List[Program], chain_map: TableBase, maps: List[str]):
         self.__is_destroyed = False
         self.__maps: List[str] = maps
         self.__index: int = 0
         self.__programs: List[Program] = programs
-        self.__pivot: Program = pivot
-        self.__pivot['ACTIVE_PROGRAM'][0] = ct.c_int(
-            self.__programs[self.__index].fd)
-
+        self.__chain_map: TableBase = chain_map
+        self.__programs_id: int = programs[0].probe_id
+        
     def __del__(self):
         if self.__is_destroyed:
             return
@@ -151,7 +152,7 @@ class SwapStateCompile:
         if self.__is_destroyed:
             exit(1)
         self.__index = (self.__index + 1) % 2
-        self.__pivot['ACTIVE_PROGRAM'][0] = ct.c_int(
+        self.__chain_map[self.__programs_id] = ct.c_int(
             self.__programs[self.__index].fd)
 
     def __getitem__(self, key: any) -> any:
@@ -171,13 +172,54 @@ class SwapStateCompile:
         return self.__programs[index_to_read][key]
 
 
-class DPLogLevel(Enum):
-    """Class to represent the log level of a datapath program."""
-    LOG_OFF = 0
-    LOG_INFO = 1
-    LOG_DEBUG = 2
-    LOG_WARN = 3
-    LOG_ERR = 4
+class ProbeCompilation(Dict_):
+    """Class representing the compilation object of a Probe
+
+    Attributes:
+        cp_function (ModuleType): The module containing the optional Controlplane functions
+        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
+        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.cp_function: ModuleType = None
+        self.ingress: Union[Program, SwapStateCompile] = None
+        self.egress: Union[Program, SwapStateCompile] = None
+
+
+class ClusterCompilation(Dict_):
+    """Class to represent a compilation of a Cluster object.
+
+    Attributes:
+        key (str): The name of the plugin
+        value (List[Plugin]): List of probes for that specific plugin
+    """
+    pass
+
+
+class InterfaceHolder(Dict_):
+    """Simple class to store information concerning the programs attached to an interface
+
+    Attributes:
+        name (str): The name of the interface
+        flags (int): The flags used in injection
+        offload_device (str): The name of the device to which offload the program if any
+        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
+        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
+        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
+        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
+    """
+
+    def __init__(self, name: str, flags: int, offload_device: str):
+        super().__init__()
+        self.name: str = name
+        self.flags = flags
+        self.offload_device = offload_device
+        self.ingress_xdp: List[Program] = []
+        self.ingress_tc: List[Program] = []
+        self.egress_tc: List[Program] = []
+        self.egress_xdp: List[Program] = []
 
 
 # Computing EPOCH BASE time from uptime, to synchronize bpf_ktime_get_ns()
@@ -202,10 +244,6 @@ with open(f'{__base_dir}/wrapper.c', 'r') as fp:
 # Variable to store all functions and parameters useful in all programs
 with open(f'{__base_dir}/helpers.h', 'r') as fp:
     __HELPERS = remove_c_comments(fp.read())
-
-# Variable to store the pivoting code for swap programs
-with open(f'{__base_dir}/swap.c', 'r') as fp:
-    __SWAP = remove_c_comments(fp.read())
 
 
 # Variable to specify whether batch ops are supported (kernel >= v5.6)
@@ -246,15 +284,6 @@ __DEFAULT_CFLAGS = [
     "-w",
     f'-DMAX_PROGRAMS_PER_HOOK={__MAX_PROGRAMS_PER_HOOK}',
     f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x.name}={x.value}' for x in list(DPLogLevel)]
-
-
-def get_swap_pivot() -> str:
-    """Function to return the swap pivoting code
-
-    Returns:
-        str: The swap pivoting code
-    """
-    return __SWAP
 
 
 def get_startup_code() -> str:
@@ -363,32 +392,31 @@ def get_cflags(
         + (__TC_CFLAGS if mode == BPF.SCHED_CLS else __XDP_CFLAGS)
 
 
-def swap_compile(original_code: str) -> Tuple[str, str, str]:
-    """Function to compile, if required, the original code in order to perform
-    swap of eBPF maps.
+def swap_compile(original_code: str, metrics: List[MetricConfig]) -> Tuple[str, str]:
+    """Function to compile additional functionalities from original code (swap, erase, and more)
 
     Args:
         original_code (str): The original code to be controlled
 
     Returns:
-        Tuple[str]: Only the original code if no swaps maps, else the tuple containing
-            also swap code and list of swappable maps
+        Tuple[str, str, Dict[str, MetricConfig]]: Only the original code if no swaps maps, else the tuple containing
+            also swap code and list of metrics configuration
     """
-    if original_code.find("__attribute((SWAP))") == -1:
-        return original_code, None, None
-
-    cloned_code = original_code
+    if not metrics or not any([x for x in metrics if x.swap_on_read]):
+        return original_code, None
 
     declarations = [(m.start(), m.end(), m.group()) for m in finditer(
         r"^(BPF_TABLE|BPF_QUEUESTACK).*$", original_code, MULTILINE)]
     declarations.reverse()
 
+    cloned_code = original_code
+    
     maps = []
     for start, end, declaration in declarations:
         splitted = declaration.split(',')
         map_name = splitted[1].strip(
-        ) if "BPF_Q" in declaration else splitted[3].strip()
-        if "__attribute((SWAP))" not in declaration:
+        ) if "BPF_Q" in declaration else splitted[3].strip()        
+        if not any([x for x in metrics if x.map_name == map_name]):
             tmp = splitted[0].split('(')
             prefix_decl = tmp[0]
             map_type = tmp[1]
@@ -406,9 +434,7 @@ def swap_compile(original_code: str) -> Tuple[str, str, str]:
 
     for map_name in maps:
         cloned_code = cloned_code.replace(f'{map_name}', f'{map_name}_1')
-    original_code = original_code.replace('__attribute((SWAP))', '')
-    cloned_code = cloned_code.replace('__attribute((SWAP))', '')
-    return original_code, cloned_code, maps
+    return original_code, cloned_code
 
 
 def is_batch_supp() -> bool:
