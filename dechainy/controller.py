@@ -24,7 +24,7 @@ import ctypes as ct
 
 from .exceptions import UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
-    get_pivoting_code, get_startup_code, swap_compile, \
+    get_pivoting_code, get_startup_code, precompile_parse, \
     Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
 from .configurations import ClusterConfig, PluginConfig, ProbeConfig
 from .plugins import Adaptmon, Cluster, Plugin
@@ -624,9 +624,11 @@ class Controller(metaclass=Singleton):
                 f'interface {config.interface}, mode {mode_map_name}')
             current_probes = len(self.__programs[idx][map_of_interest])
 
-            original_code, swap_code = swap_compile(config[program_type], config[f"{program_type}_metrics"]) if config.plugin_name == Adaptmon.__name__ else config[program_type], None
+            original_code, swap_code, features = config[program_type], None, {}
+            if config.plugin_name == Adaptmon.__name__.lower():
+                original_code, swap_code, features = precompile_parse(config[program_type])
 
-            cflags = plugin_cflags + config.cflags +\
+            cflags = plugin_cflags + config.cflags + \
                 get_cflags(mode, program_type,
                            current_probes, config.log_level)
 
@@ -642,7 +644,7 @@ class Controller(metaclass=Singleton):
                 # TODO: Next instruction when needed? It always calls bpf_redirect...
                 self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][current_probes] = \
                     ct.c_int(self.__programs[red_idx][map_of_interest][0].fd)
-
+            
             # Compiling BPF given the formatted code, CFLAGS for the current Mode and CFLAGS
             # for the specific Plugin class if any
             b = BPF(
@@ -657,8 +659,8 @@ class Controller(metaclass=Singleton):
             # Loading compiled "internal_handler" function and set the previous
             # plugin program to call in the CHAIN to the current function
             # descriptor
-            p = Program(config.interface, idx, mode, b,
-                        b.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
+            p = Program(config.interface, idx, mode, b, b.load_func('internal_handler', 
+                mode, device=offload_device).fd, current_probes, red_idx, features)
             ret[program_type] = p
             if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
                 self.__programs[idx][map_of_interest][0][
@@ -668,8 +670,8 @@ class Controller(metaclass=Singleton):
                          debug=config.debug,
                          cflags=cflags,
                          device=offload_device)
-                p1 = Program(config.interface, idx, mode,
-                             b1, b1.load_func('internal_handler', mode, device=offload_device).fd, current_probes, red_idx)
-                ret[program_type] = SwapStateCompile([p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'], [x.map_name for x in config[f"{program_type}_metrics"] if x.swap_on_read])
+                p1 = Program(config.interface, idx, mode, b1, b1.load_func('internal_handler',
+                    mode, device=offload_device).fd, current_probes, red_idx, features)
+                ret[program_type] = SwapStateCompile([p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
             self.__programs[idx][map_of_interest].append(p)
         return ret

@@ -92,18 +92,12 @@ class ClusterConfig(Dict):
         self.name: str = obj['name'] if 'name' in obj else None
 
 
-class MetricConfig:
+class MetricFeatures:
     #TODO: write Doc
-    def __init__(self, obj: dict = None) -> None:
-        if not obj:
-            obj = {}
-        if not "map_name" in obj:
-            raise AttributeError("Need to provide the name of the underlying map")
-        self.name = obj["name"] if "name" in obj else None
-        self.map_name = obj["map_name"]
-        self.description = obj["description"] if "description" in obj else None
-        self.swap_on_read = obj["swap_on_read"] if "swap_on_read" in obj else False
-        self.empty_on_read = obj["empty_on_read"] if "empty_on_read" in obj else False
+    def __init__(self, swap: bool = False, empty: bool = False, export: bool = False) -> None:
+        self.swap = swap
+        self.empty = empty
+        self.export = export
 
 
 class ProbeConfig(Dict):
@@ -154,8 +148,6 @@ class ProbeConfig(Dict):
         self.cflags: List[str] = obj['cflags'] if 'cflags' in obj else []
         self.cp_function: str = obj['cp_function'] if 'cp_function' in obj else None
         self.files: Dict[str, str] = obj['files'] if 'files' in obj else None
-        self.ingress_metrics: List[MetricConfig] = [MetricConfig(x) for x in obj['ingress_metrics']] if 'ingress_metrics' in obj else []
-        self.egress_metrics:  List[MetricConfig] = [MetricConfig(x) for x in obj['egress_metrics']] if 'egress_metrics' in obj else []
         self.debug: bool = obj['debug'] if 'debug' in obj else False
         self.redirect: bool = obj['redirect'] if 'redirect' in obj else None
         self.log_level: int = DPLogLevel(

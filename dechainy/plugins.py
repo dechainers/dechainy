@@ -188,13 +188,13 @@ class Adaptmon(Plugin):
         if isinstance(self.programs[program_type], SwapStateCompile):
             self.programs[program_type].trigger_read()
         
-        metric_ref = next(x for x in self._config[f"{program_type}_metrics"] if x.map_name == metric_name)
+        features = self.programs[program_type].features[metric_name]
         map_ref = self.programs[program_type][metric_name]
         ret = {}
 
         if is_batch_supp():
             try:
-                for k, v in map_ref.items_lookup_and_delete_batch() if metric_ref.empty_on_read else map_ref.items_lookup_batch():
+                for k, v in map_ref.items_lookup_and_delete_batch() if features.empty else map_ref.items_lookup_batch():
                     ret[k.value] = v.value
             except Exception:
                 # TODO: Check for update before exception
@@ -204,7 +204,7 @@ class Adaptmon(Plugin):
         if not ret:
             for k, v in map_ref.items():
                 ret[k.value] = v.value
-                if metric_ref.empty_on_read:
+                if features.empty:
                     del map_ref[k]
         return ret
 
@@ -223,12 +223,14 @@ class Adaptmon(Plugin):
             self.programs[program_type].trigger_read()
         
         ret = {}
-        for metric_ref in self._config[f"{program_type}_metrics"]:
-            map_ref = self.programs[program_type][metric_ref.map_name]
+        for map_name, features in self.programs[program_type].features.items():
+            if not features.export:
+                continue
+            map_ref = self.programs[program_type][map_name]
             tmp = {}
             if is_batch_supp():
                 try:
-                    for k, v in map_ref.items_lookup_and_delete_batch() if metric_ref.empty_on_read else map_ref.items_lookup_batch():
+                    for k, v in map_ref.items_lookup_and_delete_batch() if features.empty else map_ref.items_lookup_batch():
                         tmp[k.value] = v.value
                 except Exception:
                     # TODO: Check for update before exception
@@ -238,9 +240,9 @@ class Adaptmon(Plugin):
             if not tmp:
                 for k, v in map_ref.items():
                     tmp[k.value] = v.value
-                    if metric_ref.empty_on_read:
+                    if features.empty:
                         del map_ref[k]
-            ret[metric_ref.map_name] = tmp
+            ret[map_name] = tmp
         return ret
 
 

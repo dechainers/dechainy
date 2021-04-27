@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-BPF_TABLE("array", int, uint64_t, TOTAL_PACKETS, 1);
+BPF_TABLE("array", int, uint64_t, TOTAL_PACKETS, 1)__attributes__((EXPORT));
 
 static __always_inline
 int handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {

@@ -25,7 +25,7 @@ from bcc import BPF
 from bcc.table import QueueStack, TableBase
 
 from .utility import remove_c_comments, Dict as Dict_
-from .configurations import DPLogLevel, MetricConfig
+from .configurations import DPLogLevel, MetricFeatures
 
 class Metadata(ct.Structure):
     """C struct representing the pkt_metadata structure in Data Plane programs
@@ -61,6 +61,7 @@ class Program:
         bpf (BPF): The eBPF compiled program
         fd (int, optional): The file descriptor of the main function in the program. Defaults to None.
         probe_id (int, optional): The ID of the probe. Defaults to 0.
+        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
 
     Attributes:
         interface (str): The interface to attach the program to
@@ -71,6 +72,7 @@ class Program:
         probe_id (int): The ID of the probe. Defaults to 0.
         red_idx (int): Index of the interface packets are redirect, if needed
         is_destroyed (bool): Boolean value set to True when the instance is destroyed
+        features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
     """
 
     def __init__(
@@ -81,7 +83,8 @@ class Program:
             bpf: BPF,
             fd: int = None,
             probe_id: int = 0,
-            red_idx: int = 0):
+            red_idx: int = 0,
+            features: Dict[str, MetricFeatures] = {}):
         self.interface = interface
         self.idx = idx
         self.mode = mode
@@ -89,6 +92,7 @@ class Program:
         self.probe_id = probe_id
         self.red_idx = red_idx
         self.bpf = bpf
+        self.features = features
         self.__is_destroyed = False
         if red_idx:
             self.bpf["DEVMAP"][ct.c_uint32(0)] = ct.c_int(red_idx)
@@ -121,7 +125,6 @@ class SwapStateCompile:
     Args:
         programs (List[Program]): The list of the two compiled programs
         pivot (Program): The pivoting eBPF program compiled
-        maps (List[str]): The list of maps defined as swappable
 
     Attributes:
         maps (List[str]): The maps defined as swappable
@@ -129,15 +132,16 @@ class SwapStateCompile:
         programs (List[Program]): The list containing the two programs compiled
         chain_map (TableBase): The eBPF table performing the chain
         programs_id (int): The probe ID of the programs
+        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
     """
 
-    def __init__(self, programs: List[Program], chain_map: TableBase, maps: List[str]):
+    def __init__(self, programs: List[Program], chain_map: TableBase):
         self.__is_destroyed = False
-        self.__maps: List[str] = maps
         self.__index: int = 0
         self.__programs: List[Program] = programs
         self.__chain_map: TableBase = chain_map
         self.__programs_id: int = programs[0].probe_id
+        self.features: Dict[str, MetricFeatures] = programs[0].features
         
     def __del__(self):
         if self.__is_destroyed:
@@ -167,7 +171,7 @@ class SwapStateCompile:
         if self.__is_destroyed:
             exit(1)
         index_to_read = int(not self.__index)
-        if index_to_read == 1 and key in self.__maps:
+        if index_to_read == 1 and key in self.features:
             key += "_1"
         return self.__programs[index_to_read][key]
 
@@ -392,49 +396,56 @@ def get_cflags(
         + (__TC_CFLAGS if mode == BPF.SCHED_CLS else __XDP_CFLAGS)
 
 
-def swap_compile(original_code: str, metrics: List[MetricConfig]) -> Tuple[str, str]:
+def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeatures]]:
     """Function to compile additional functionalities from original code (swap, erase, and more)
 
     Args:
         original_code (str): The original code to be controlled
 
     Returns:
-        Tuple[str, str, Dict[str, MetricConfig]]: Only the original code if no swaps maps, else the tuple containing
+        Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps, else the tuple containing
             also swap code and list of metrics configuration
     """
-    if not metrics or not any([x for x in metrics if x.swap_on_read]):
-        return original_code, None
-
     declarations = [(m.start(), m.end(), m.group()) for m in finditer(
         r"^(BPF_TABLE|BPF_QUEUESTACK).*$", original_code, MULTILINE)]
     declarations.reverse()
-
-    cloned_code = original_code
     
-    maps = []
+    need_swap = any(x for _,_, x in declarations if "__attributes__" in x and "SWAP" in x.split("__attributes__")[1])
+    cloned_code = original_code if need_swap else None
+    
+    maps = {}
     for start, end, declaration in declarations:
-        splitted = declaration.split(',')
-        map_name = splitted[1].strip(
-        ) if "BPF_Q" in declaration else splitted[3].strip()        
-        if not any([x for x in metrics if x.map_name == map_name]):
+        new_decl, splitted = declaration, declaration.split(',')
+        map_name = splitted[1].strip() if "BPF_Q" in declaration else splitted[3].strip()
+
+        if "__attributes__" in declaration:
+            tmp = declaration.split("__attributes__")
+            new_decl = tmp[0] + ";"
+            maps[map_name] = MetricFeatures(swap="SWAP" in tmp[1], export="EXPORT" in tmp[1], empty="EMPTY" in tmp[1])    
+        
+        orig_decl = new_decl
+
+        if need_swap and (map_name not in maps or not maps[map_name].swap):
             tmp = splitted[0].split('(')
             prefix_decl = tmp[0]
             map_type = tmp[1]
-            new_decl = declaration.replace(map_type, '"extern"')
+            orig_decl = orig_decl.replace(map_type, '"extern"')
             if "BPF_TABLE_" in prefix_decl:  # shared/public/pinned
-                new_decl = new_decl.replace(prefix_decl, "BPF_TABLE")
+                orig_decl = orig_decl.replace(prefix_decl, "BPF_TABLE")
             elif "BPF_QUEUESTACK_" in prefix_decl:  # shared/public/pinned
-                new_decl = new_decl.replace(prefix_decl, "BPF_QUEUESTACK")
+                orig_decl = orig_decl.replace(prefix_decl, "BPF_QUEUESTACK")
             else:
-                original_code = original_code[:start + 9] + \
-                    "_SHARED" + original_code[start + 9:]
+                index = len(prefix_decl)
+                orig_decl = orig_decl[:index] + "_SHARED" + orig_decl[index:]
+        
+        original_code = original_code[:start] + orig_decl + original_code[end:]
+        if cloned_code:
             cloned_code = cloned_code[:start] + new_decl + cloned_code[end:]
-        elif map_name not in maps:
-            maps.append(map_name)
-
-    for map_name in maps:
-        cloned_code = cloned_code.replace(f'{map_name}', f'{map_name}_1')
-    return original_code, cloned_code
+    
+    for map_name, features in maps.items():
+        if features.swap:
+            cloned_code = cloned_code.replace(map_name, f"{map_name}_1")
+    return original_code, cloned_code, maps
 
 
 def is_batch_supp() -> bool:
