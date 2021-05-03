@@ -13,7 +13,7 @@
 # limitations under the License.
 from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
-from re import sub
+from re import sub, DOTALL
 from threading import Thread, Event
 from typing import Callable
 
@@ -80,7 +80,7 @@ def remove_c_comments(text: str) -> str:
         str: the string sanitized from comments
     """
     return sub(r"""(?:\/\/(?:\\\n|[^\n])*\n)|(?:\/\*[\s\S]*?\*\/)|((?:R"([^(\\\s]{0,16})\([^)]*\)\2")|"""
-               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1\n", text)
+               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1", text, flags=DOTALL)
 
 
 # Simple dictionary containing protocol names and their integer value

@@ -15,7 +15,7 @@ import time
 import ctypes as ct
 
 from os.path import dirname
-from re import finditer, MULTILINE
+from re import finditer, MULTILINE, match
 from subprocess import run, PIPE
 from typing import Dict, List, Tuple, Union
 from atexit import unregister
@@ -332,28 +332,28 @@ def get_formatted_code(
     if not code:
         return ''
     # Removing C-like comments
-    cloned = remove_c_comments(code)
+    code = remove_c_comments(code)
     # Finding dp_log function invocations if any, and reverse to avoid bad
     # indexes while updating
     matches = [(m.start(), m.end())
-               for m in finditer('dp_log.*;', cloned)]
+               for m in finditer('dp_log.*;', code)]
     matches.reverse()
     for start, end in matches:
         # Getting the log level specified
-        log_level = cloned[start + 7: end].split(",")[0]
+        log_level = code[start + 7: end].split(",")[0]
         # Substitute the dp_log invocation (length 6 characters) with the right
         # logging function
-        cloned = cloned[:start] \
+        code = code[:start] \
             + f'if ({log_level} >= LOG_LEVEL)' \
             + '{LOG_STRUCT' \
-            + cloned[start + 6:end] \
+            + code[start + 6:end] \
             + 'log_buffer.perf_submit(ctx, &msg_struct, sizeof(msg_struct));}' \
-            + cloned[end:]
+            + code[end:]
     return __HELPERS + __WRAPPER_CODE .replace(
         'PROGRAM_TYPE',
         program_type) .replace(
         'MODE',
-        __TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress" else __XDP_MAP_SUFFIX) + cloned
+        __TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress" else __XDP_MAP_SUFFIX) + code
 
 
 def get_bpf_values(mode: int, flags: int, interface: str, program_type: str) -> Tuple[int, int, str, str, str]:
