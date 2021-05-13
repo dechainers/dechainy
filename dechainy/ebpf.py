@@ -15,7 +15,7 @@ import time
 import ctypes as ct
 
 from os.path import dirname
-from re import finditer, MULTILINE, match
+from re import finditer, MULTILINE
 from subprocess import run, PIPE
 from typing import Dict, List, Tuple, Union
 from atexit import unregister
@@ -26,6 +26,7 @@ from bcc.table import QueueStack, TableBase
 
 from .utility import remove_c_comments, Dict as Dict_
 from .configurations import DPLogLevel, MetricFeatures
+
 
 class Metadata(ct.Structure):
     """C struct representing the pkt_metadata structure in Data Plane programs
@@ -142,7 +143,7 @@ class SwapStateCompile:
         self.__chain_map: TableBase = chain_map
         self.__programs_id: int = programs[0].probe_id
         self.features: Dict[str, MetricFeatures] = programs[0].features
-        
+
     def __del__(self):
         if self.__is_destroyed:
             return
@@ -379,7 +380,7 @@ def get_cflags(
         mode: int,
         program_type: str,
         probe_id: int = 0,
-        log_level: int = DPLogLevel.LOG_INFO) -> List[str]:
+        log_level: int = DPLogLevel.LOG_INFO.value) -> List[str]:
     """Function to return CFLAGS according to ingress/egress and TC/XDP
 
     Args:
@@ -391,7 +392,7 @@ def get_cflags(
     Returns:
         List[str]: The list of computed cflags
     """
-    return [f'-DPROBE_ID={probe_id}', f'-DPTYPE={0 if program_type == "ingress" else 1}', f'-DLOG_LEVEL={log_level.value}'] \
+    return [f'-DPROBE_ID={probe_id}', f'-DPTYPE={0 if program_type == "ingress" else 1}', f'-DLOG_LEVEL={log_level}'] \
         + __DEFAULT_CFLAGS \
         + (__TC_CFLAGS if mode == BPF.SCHED_CLS else __XDP_CFLAGS)
 
@@ -403,28 +404,35 @@ def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeat
         original_code (str): The original code to be controlled
 
     Returns:
-        Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps, else the tuple containing
-            also swap code and list of metrics configuration
+        Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps,
+            else the tuple containing also swap code and list of metrics configuration
     """
+    # Find map declarations, from the end to the beginning
     declarations = [(m.start(), m.end(), m.group()) for m in finditer(
         r"^(BPF_TABLE|BPF_QUEUESTACK).*$", original_code, MULTILINE)]
     declarations.reverse()
-    
-    need_swap = any(x for _,_, x in declarations if "__attributes__" in x and "SWAP" in x.split("__attributes__")[1])
+
+    # Check if at least one map needs swap
+    need_swap = any(x for _, _, x in declarations if "__attributes__" in x and "SWAP" in x.split(
+        "__attributes__")[1])
     cloned_code = original_code if need_swap else None
-    
+
     maps = {}
     for start, end, declaration in declarations:
         new_decl, splitted = declaration, declaration.split(',')
-        map_name = splitted[1].strip() if "BPF_Q" in declaration else splitted[3].strip()
+        map_name = splitted[1].strip(
+        ) if "BPF_Q" in declaration else splitted[3].strip()
 
+        # Check if this declaration has some attribute
         if "__attributes__" in declaration:
             tmp = declaration.split("__attributes__")
             new_decl = tmp[0] + ";"
-            maps[map_name] = MetricFeatures(swap="SWAP" in tmp[1], export="EXPORT" in tmp[1], empty="EMPTY" in tmp[1])    
-        
+            maps[map_name] = MetricFeatures(
+                swap="SWAP" in tmp[1], export="EXPORT" in tmp[1], empty="EMPTY" in tmp[1])
+
         orig_decl = new_decl
 
+        # If need swap and this map doesn't, then perform changes in declaration
         if need_swap and (map_name not in maps or not maps[map_name].swap):
             tmp = splitted[0].split('(')
             prefix_decl = tmp[0]
@@ -437,11 +445,11 @@ def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeat
             else:
                 index = len(prefix_decl)
                 orig_decl = orig_decl[:index] + "_SHARED" + orig_decl[index:]
-        
+
         original_code = original_code[:start] + orig_decl + original_code[end:]
         if cloned_code:
             cloned_code = cloned_code[:start] + new_decl + cloned_code[end:]
-    
+
     for map_name, features in maps.items():
         if features.swap:
             cloned_code = cloned_code.replace(map_name, f"{map_name}_1")
@@ -456,6 +464,8 @@ def is_batch_supp() -> bool:
     """
     global __is_batch_supp
     if __is_batch_supp is None:
-        major, minor = [int(x) for x in run(['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('.')[:2]]
-        __is_batch_supp = True if major > 5 or (major == 5 and minor >= 6) else False
+        major, minor = [int(x) for x in run(
+            ['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('.')[:2]]
+        __is_batch_supp = True if major > 5 or (
+            major == 5 and minor >= 6) else False
     return __is_batch_supp

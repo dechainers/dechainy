@@ -1,17 +1,17 @@
 # DDoS Analyzer
 
-DDoS Analyzer is a dynamically programmable probe (plugin Adaptmon) to extract features from network traffic packets on a specific network interface, and feed them into a Convolutional Neural Network, in order to predict possible ongoing cyber attacks.
+DDoS Analyzer is a dynamically programmable probe (plugin Adaptmon) to extract features from network traffic packets on a specific network interface, and feed them into a Convolutional Neural Network, in order to predict possible ongoing cyberattacks.
 
 ## eBPF
 
 The eBPF programs, which are invoked for each passing packet, are composed by two main maps:
 
-* SESSIONS_TRACKED_DDOS: an Hash map containing the session identifier of each connection and some parameters, like the number of registered packets and the address of the heuristically computed server
+* SESSIONS_TRACKED_DDOS: a Hash map containing the session identifier of each connection and some parameters, like the number of registered packets and the address of the heuristically computed server
 * PACKETS_BUFFER: a fixed-size Queue which contains all the accepted packets, filtered by their features.
 
 A complete list of features extracted is:
 
-* timestamp: timestamp of when the packet has been analyzed 
+* timestamp: timestamp of when the packet has been analyzed
 * length: the length of the Layer3 packet
 * ipFlagsFrag: the IP field Flags+FragmentOffset (16 bytes in total, 3 for flags)
 * tcpLen: the length of the TCP packet
@@ -27,7 +27,7 @@ Whenever a new packet is analyzed, the programs checks whether the current sessi
 
 ## Control Plane
 
-The Control Plane periodically atomically reads the PACKETS_BUFFER map and erase the content of SESSIONS_TRACKED_DDOS, in order to be able to start monitoring new sessions once the program has been swapped back. Then, asynchronously manipulate and trasform such data, in order to feed the neural network provided. More in details: 
+The control plane periodically atomically reads the PACKETS_BUFFER map and erase the content of SESSIONS_TRACKED_DDOS, in order to be able to start monitoring new sessions once the program has been swapped back. Then, asynchronously manipulate and trasform such data, in order to feed the neural network provided. More in details:
 
 * Packets are grouped in arrays for each flow
 * Packets' values are normalized
@@ -58,6 +58,6 @@ The probe configuration must be as follows:
 }
 ```
 
-## Acknowledgement
+## Acknowledgment
 
 A special thanks goes to all the author of [this paper](https://www.researchgate.net/publication/339059257_Lucid_A_Practical_Lightweight_Deep_Learning_Solution_for_DDoS_Attack_Detection) ([GitHub repo](https://github.com/doriguzzi/lucid-ddos)), my current colleagues, for their incredibly efficient finding I tried to re-implement as example in this framework.

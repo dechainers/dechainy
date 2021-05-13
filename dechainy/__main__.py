@@ -30,7 +30,7 @@ def __spawn_server(config: AppConfig):
         config (AppConfig): the startup configuration detetched
     """
     app, controller = create_server(
-        log_level=config.log_level, plugins_to_load=config.plugins)
+        log_level=config.log_level, plugins_to_load=config.plugins, custom_cp=config.custom_cp)
     for cluster in config.clusters:
         controller.create_cluster(cluster.name, cluster)
     for probe in config.probes:
@@ -55,7 +55,7 @@ def __spawn_local(config: AppConfig):
             'No probes or clusters specified, starting DeChainy locally wouldn\'t make sense')
         exit(1)
     controller = Controller(log_level=config.log_level,
-                            plugins_to_load=config.plugins)
+                            plugins_to_load=config.plugins, custom_cp=config.custom_cp)
     for cluster in config.clusters:
         controller.create_cluster(cluster.name, cluster)
     for probe in config.probes:

@@ -37,6 +37,7 @@ class AppConfig(Dict):
         cluster (List[ClusterConfig]): List of clusters to create at startup. Default [].
         probes (List[ProbeConfig]): List of probes to create at startup. Default [].
         server (ServerConfig): Server configuration, if any. Default None.
+        custom_cp (bool): True if the system can accept custom Control plane code, False otherwise. Default True.
         log_level (int): Log level for the entire application. Default INFO.
     """
 
@@ -51,6 +52,7 @@ class AppConfig(Dict):
             x) for x in obj['probes']] if 'probes' in obj else []
         self.server: ServerConfig = ServerConfig(
             obj['server']) if 'server' in obj else None
+        self.custom_cp: bool = obj['custom_cp'] if 'custom_cp' in obj else True
         self.log_level: int = obj['log_level'] if 'log_level' in obj else INFO
 
 
@@ -88,16 +90,21 @@ class ClusterConfig(Dict):
             x) for x in obj['probes']] if 'probes' in obj else []
         self.time_window: float = obj['time_window'] if 'time_window' in obj else 10
         self.cp_function: str = obj['cp_function'] if 'cp_function' in obj else None
-        # Following values are overwritten by Controller)
         self.name: str = obj['name'] if 'name' in obj else None
 
 
 class MetricFeatures:
-    #TODO: write Doc
+    """Class to represent all the possible features for an Adaptmon metric
+
+    Attributes:
+        swap(bool): True if the metric requires swapping programs, False otherwise
+        empty(bool): True if the metric needs to be emptied, False otherwise
+        export(bool): True if the metric needs to be exported, False otherwise
+    """
     def __init__(self, swap: bool = False, empty: bool = False, export: bool = False) -> None:
-        self.swap = swap
-        self.empty = empty
-        self.export = export
+        self.swap: bool = swap
+        self.empty: bool = empty
+        self.export: bool = export
 
 
 class ProbeConfig(Dict):
@@ -110,6 +117,7 @@ class ProbeConfig(Dict):
         time_window (float): Periodic time to locally call the Controlplane function, if any. Default 10.
         ingress (str): Code for the ingress hook. Default None.
         egress (str): Code for the egress hook. Default None.
+        cp_function (str): The Control plane routine to be periodically executed if needed. Default "".
         cflags (List[str]): List of Cflags to be used while compiling programs. Default [].
         files (Dict[str, str]): Dictionary containing additional files for the probe. Default {}.
         debug (bool): True if the probe must be inserted in debug mode. Default False.
@@ -151,7 +159,7 @@ class ProbeConfig(Dict):
         self.debug: bool = obj['debug'] if 'debug' in obj else False
         self.redirect: bool = obj['redirect'] if 'redirect' in obj else None
         self.log_level: int = DPLogLevel(
-            obj['log_level']) if 'log_level' in obj else DPLogLevel.LOG_INFO
+            obj['log_level']) if 'log_level' in obj else DPLogLevel.LOG_INFO.value
         # Following values are overwritten by Controller
         self.plugin_name: str = obj['plugin'] if 'plugin' in obj else None
         self.name: str = obj['name'] if 'name' in obj else None
@@ -218,7 +226,7 @@ class MitigatorRule(Dict):
 
     Attributes:
         ip (str): The Ip to block
-        netmask (str): The length of the netmask. Default 32.
+        netmask (int): The length of the netmask. Default 32.
     """
 
     def __init__(self, obj: dict = None):
@@ -228,7 +236,7 @@ class MitigatorRule(Dict):
         if "ip" not in obj:
             raise KeyError(
                 "Impossible inserting a rule without specifying the IP")
-        self.netmask: str = obj["netmask"] if "netmask" in obj else 32
+        self.netmask: int = obj["netmask"] if "netmask" in obj else 32
         self.ip: str = obj["ip"]
 
     def __eq__(self, other):

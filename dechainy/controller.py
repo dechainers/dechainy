@@ -22,12 +22,12 @@ from bcc import BPF
 from os.path import isfile, dirname
 import ctypes as ct
 
-from .exceptions import UnknownInterfaceException, NoCodeProbeException
+from .exceptions import ClusterWithoutCPException, CustomCPDisabledException, UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
     get_pivoting_code, get_startup_code, precompile_parse, \
     Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
 from .configurations import ClusterConfig, PluginConfig, ProbeConfig
-from .plugins import Adaptmon, Cluster, Plugin
+from .plugins import Cluster, Plugin
 from .utility import Singleton
 from . import exceptions
 from . import plugins
@@ -40,28 +40,24 @@ class Controller(metaclass=Singleton):
     - compiling/removing programs from the interfaces
 
     All its public methods can be used both within an HTTP server, or locally by calling controller.method()
+
+    Attributes:
+        logger (Logger): The class logger
+        declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin,
+                                            its class declaration and eBPF codes (if not customizable)
+        programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index,
+                                            the object holding all eBPF programs, for each type (TC, XDP, ingress/egress)
+        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin,
+                                            an inner dictionary holding the Plugin instance, given its name
+        clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
+        custom_cp (bool): True if enabled the possibility to accept user-define Control plane code,
+                                            False otherwise. Default True.
+        is_destroyed (bool): Variable to keep track of the instance lifecycle
+        ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
+        startup (BPF): the startup eBPF compiled program, used to open perf buffers
     """
 
-    def __init__(self, log_level: int = INFO, plugins_to_load: List[str] = None):
-        """Controller class, used to manage all interactions and the state of the application.
-
-        Args:
-            log_level (int, optional): The log level of the entire application. Defaults to INFO.
-            plugins_to_load (List[str], optional): The list of plugins to active. Defaults to None (ALL).
-
-        Attributes:
-            logger (Logger): The class logger
-            declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin, its class declaration
-                and eBPF codes (if not customizable)
-            programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index, the object
-                holding all eBPF programs, for each type (TC, XDP, ingress/egress)
-            probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin, an inner dictionary
-                holding the Plugin instance, given its name
-            clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
-            is_destroyed (bool): Variable to keep track of the instance lifecycle
-            ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
-            startup (BPF): the startup eBPF compiled program, used to open perf buffers
-        """
+    def __init__(self, log_level: int = INFO, plugins_to_load: List[str] = None, custom_cp: bool = True):
         # Initializing logger
         self.__logger = getLogger(self.__class__.__name__)
         self.__logger.setLevel(log_level)
@@ -77,6 +73,7 @@ class Controller(metaclass=Singleton):
         self.__programs: Dict[int, InterfaceHolder] = {}
         self.__probes: Dict[str, Dict[str, Plugin]] = {}
         self.__clusters: Dict[str, Cluster] = {}
+        self.__custom_cp: bool = custom_cp
         self.__is_destroyed: bool = False
 
         # Initialize IpRoute and check whether there's another instance of the
@@ -146,12 +143,12 @@ class Controller(metaclass=Singleton):
                 self.__ip.tc("del", "clsact", idx)
         self.__ip.link("del", ifname="DeChainy")
 
-    def __log_and_raise(self, msg: str, exception: callable):
+    def __log_and_raise(self, msg: str, exception: Exception):
         """Method to log a message and raise the specified exception
 
         Args:
             msg (str): The message string to log
-            exception (callable): The exception to throw
+            exception (Exception): The exception to throw
 
         Raises:
             exception: The exception specified to be thrown
@@ -252,13 +249,13 @@ class Controller(metaclass=Singleton):
         if not conf.ingress and not conf.egress:
             raise NoCodeProbeException("There is no Ingress/Egress code active for this probe,"
                                        " must leave at least 1 accepted hook active")
-        if conf.cp_function:
+        if conf.cp_function and self.__custom_cp:
             module = ModuleType(f'{plugin_name}_{probe_name}')
             exec(conf.cp_function, module.__dict__)
             if hasattr(module, "pre_compilation"):
                 module.pre_compilation(conf)
         comp = self.__compile(
-            conf, self.__declarations[plugin_name].class_declaration.get_cflags())
+            conf, self.__declarations[plugin_name].class_declaration)
         prb = self.__declarations[plugin_name].class_declaration(
             conf, module, comp)
         self.__probes[plugin_name][probe_name] = prb
@@ -297,6 +294,9 @@ class Controller(metaclass=Singleton):
             any: The return type specified in the called function
         """
         self.__check_probe_exists(plugin_name, probe_name)
+        if not self.__custom_cp:
+            raise CustomCPDisabledException(
+                "Restart the framework without `custom_cp`: false")
         try:
             return getattr(self.__probes[plugin_name][probe_name], f'{func_name}')(*argv)
         except AttributeError:
@@ -315,6 +315,11 @@ class Controller(metaclass=Singleton):
             cluster_name (str): The name of the cluster
             is_creating (bool, optional): True if function called when creating cluster. Defaults to False.
         """
+        if not self.__custom_cp:
+            self.__log_and_raise(
+                "Restart the framework without `cp_function`: false",
+                CustomCPDisabledException)
+
         if not is_creating and cluster_name not in self.__clusters:
             self.__log_and_raise(
                 f'Cluster {cluster_name} not found',
@@ -331,6 +336,10 @@ class Controller(metaclass=Singleton):
             str: The name of the cluster created
         """
         self.__check_cluster_exists(cluster_name, is_creating=True)
+        if not conf.cp_function:
+            self.__log_and_raise(
+                'No Control plane code speficied, the Cluster would not make sense',
+                ClusterWithoutCPException)
         conf.name = cluster_name
         cluster_comp = ClusterCompilation()
         for probe_config in conf.probes:
@@ -343,11 +352,10 @@ class Controller(metaclass=Singleton):
                 self.__probes[probe_config.plugin_name][probe_config.name]
         module = None
         # Loading the Control Plane function of the Cluster if any
-        if conf.cp_function:
-            module = ModuleType(cluster_name)
-            exec(conf.cp_function, module.__dict__)
-            if hasattr(module, "pre_compilation"):
-                module.pre_compilation(conf)
+        module = ModuleType(cluster_name)
+        exec(conf.cp_function, module.__dict__)
+        if hasattr(module, "pre_compilation"):
+            module.pre_compilation(conf)
         self.__clusters[cluster_name] = plugins.Cluster(
             conf, module, cluster_comp)
         self.__logger.info(f'Successfully created Cluster {cluster_name}')
@@ -384,7 +392,7 @@ class Controller(metaclass=Singleton):
         self.__check_cluster_exists(cluster_name)
         return self.__clusters[cluster_name].__repr__()
 
-    def execute_cp_function_cluster(self, cluster_name: str, func_name: str, *argv: tuple) -> any:
+    def execute_cp_function_cluster(self, cluster_name: str, func_name: str) -> any:
         """Function to execute a Control Plane function of a cluster
 
         Args:
@@ -396,12 +404,8 @@ class Controller(metaclass=Singleton):
             any: The return type specified in the user-defined function
         """
         self.__check_cluster_exists(cluster_name)
-        try:
-            return getattr(self.__clusters[cluster_name], f'{func_name}')(*argv)
-        except AttributeError:
-            self.__log_and_raise(
-                f'Cluster {cluster_name} does not support function {func_name}',
-                exceptions.UnsupportedOperationException)
+        # This function exists by design, otherwise the Cluster would not have been created
+        return getattr(self.__clusters[cluster_name], 'exec')()
 
     ######################################################################
     # ------------- Function to manage bpf code --------------------------
@@ -572,12 +576,12 @@ class Controller(metaclass=Singleton):
         self.__programs[idx][f'{program_type}_{mode_map_name}'].append(
             Program(interface, idx, mode, b, b.load_func('handler', mode).fd))
 
-    def __compile(self, config: ProbeConfig, plugin_cflags: List[str]) -> ProbeCompilation:
+    def __compile(self, config: ProbeConfig, plugin_class: Plugin) -> ProbeCompilation:
         """Internal Function to compile a probe and inject respective eBPF programs
 
         Args:
             config (ProbeConfig): The probe configuration
-            plugin_class (List[str]): The plugin class declaration belonging to the probe
+            plugin_class (Plugin): The Plugin class declaration
 
         Returns:
             ProbeCompilation: A ProbeCompilation object containing the programs and the CP function if any
@@ -625,10 +629,11 @@ class Controller(metaclass=Singleton):
             current_probes = len(self.__programs[idx][map_of_interest])
 
             original_code, swap_code, features = config[program_type], None, {}
-            if config.plugin_name == Adaptmon.__name__.lower():
-                original_code, swap_code, features = precompile_parse(config[program_type])
+            if plugin_class.is_programmable():
+                original_code, swap_code, features = precompile_parse(
+                    config[program_type])
 
-            cflags = plugin_cflags + config.cflags + \
+            cflags = plugin_class.get_cflags() + config.cflags + \
                 get_cflags(mode, program_type,
                            current_probes, config.log_level)
 
@@ -644,7 +649,7 @@ class Controller(metaclass=Singleton):
                 # TODO: Next instruction when needed? It always calls bpf_redirect...
                 self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][current_probes] = \
                     ct.c_int(self.__programs[red_idx][map_of_interest][0].fd)
-            
+
             # Compiling BPF given the formatted code, CFLAGS for the current Mode and CFLAGS
             # for the specific Plugin class if any
             b = BPF(
@@ -657,21 +662,30 @@ class Controller(metaclass=Singleton):
                 device=offload_device)
 
             # Loading compiled "internal_handler" function and set the previous
-            # plugin program to call in the CHAIN to the current function
-            # descriptor
-            p = Program(config.interface, idx, mode, b, b.load_func('internal_handler', 
-                mode, device=offload_device).fd, current_probes, red_idx, features)
+            # plugin program to call in the CHAIN to the current function descriptor
+            p = Program(config.interface, idx, mode, b,
+                        b.load_func('internal_handler', mode,
+                                    device=offload_device).fd,
+                        current_probes, red_idx, features)
             ret[program_type] = p
+
+            # Updating Service Chain
             if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
                 self.__programs[idx][map_of_interest][0][
                     f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(p.fd)
+
+            # Compiling swap program if needed
             if swap_code:
                 b1 = BPF(text=get_formatted_code(mode, program_type, swap_code),
                          debug=config.debug,
                          cflags=cflags,
                          device=offload_device)
-                p1 = Program(config.interface, idx, mode, b1, b1.load_func('internal_handler',
-                    mode, device=offload_device).fd, current_probes, red_idx, features)
-                ret[program_type] = SwapStateCompile([p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
+                p1 = Program(config.interface, idx, mode, b1,
+                             b1.load_func('internal_handler', mode,
+                                          device=offload_device).fd,
+                             current_probes, red_idx, features)
+                ret[program_type] = SwapStateCompile(
+                    [p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
+            # Append the main program to the list of programs
             self.__programs[idx][map_of_interest].append(p)
         return ret

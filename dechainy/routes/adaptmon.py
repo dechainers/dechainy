@@ -11,12 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Union
-from ..configurations import MitigatorRule
 from .. import exceptions, Controller
 from ..plugins import Adaptmon
-from flask import abort, Blueprint, request
-from json import loads
+from flask import abort, Blueprint
 
 __plugin_name = Adaptmon.__name__.lower()
 
@@ -43,6 +40,7 @@ def retrieve_metric(probe_name: str, program_type: str, metric_name: str) -> any
             __plugin_name, probe_name, 'retrieve_metric', program_type, metric_name)
     except (exceptions.ProbeNotFoundException, exceptions.UnsupportedOperationException, LookupError) as e:
         abort(404, e)
+
 
 @bp.route(f'/plugins/{__plugin_name}/<probe_name>/<program_type>/metrics', methods=['GET'])
 def retrieve_metrics(probe_name: str, program_type: str) -> any:

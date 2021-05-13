@@ -17,7 +17,8 @@ code from their [GitHub page](https://github.com/iovisor/bcc) and compile it as 
 
 The usage of the Docker images is strongly recommended, to avoid installing the entire BCC dependency locally.
 
-#### Local
+### Local
+
 ```bash
 # Installing BCC
 git clone https://github.com/iovisor/bcc.git
@@ -42,6 +43,7 @@ sudo python3 setup.py install
 From now on, you can reference to this framework as you would do for any other Python package, like *import numpy*.
 
 ### Docker
+
 ```bash
 docker build -f Dockerfile -t s41m0n/dechainy:latest .
 ```
