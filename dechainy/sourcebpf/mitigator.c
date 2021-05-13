@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Map containing the blacklisted IPS
-BPF_TABLE("hash", struct lpm_key, uint64_t, BLACKLISTED_IPS, MAX_IPS);
+BPF_F_TABLE("lpm_trie", struct lpm_key, uint64_t, BLACKLISTED_IPS, MAX_IPS, BPF_F_NO_PREALLOC);
 
 static __always_inline
 int handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {

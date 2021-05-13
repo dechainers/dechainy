@@ -24,7 +24,7 @@ from .controller import Controller
 __first: bool = True
 
 
-def create_server(log_level=INFO, plugins_to_load: List[str] = None) -> Tuple[Flask, Controller]:
+def create_server(log_level=INFO, plugins_to_load: List[str] = None, custom_cp: bool = True) -> Tuple[Flask, Controller]:
     """Function to return a Flask Server and a Controller given the parameters.
     It is allowed to have multiple servers, but they must share the same Controller
     instance, otherwise there could be problems with the network interfaces cards.
@@ -32,12 +32,13 @@ def create_server(log_level=INFO, plugins_to_load: List[str] = None) -> Tuple[Fl
     Args:
         log_level ([type], optional): log level info integer. Defaults to INFO.
         plugins_to_load (List[str], optional): list of plugins to load. If None, then load all of them. Defaults to None.
+        custom_cp (bool): True if the framework can accept dynamic Control Plane routines, False otherwise. Default True.
 
     Returns:
         Tuple[Flask, Controller]: [description]
     """
     global __first
-    ctr = Controller(log_level=log_level, plugins_to_load=plugins_to_load)
+    ctr = Controller(log_level=log_level, plugins_to_load=plugins_to_load, custom_cp=custom_cp)
     if not __first:
         getLogger(Controller.__name__).info(
             "Attaching Controller also to another server")

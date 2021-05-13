@@ -15,19 +15,18 @@ from atexit import register
 from logging import getLogger, INFO, StreamHandler, Formatter
 from threading import Thread
 from types import ModuleType
-from typing import Dict, List
+from typing import Dict, List, Union
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
 from bcc import BPF
 from os.path import isfile, dirname
 import ctypes as ct
 
-from .exceptions import UnknownInterfaceException, NoCodeProbeException
+from .exceptions import ClusterWithoutCPException, CustomCPDisabledException, UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
-    get_pivoting_code, get_startup_code, Program, Metadata, swap_compile, get_swap_pivot, \
-    SwapStateCompile
-from .configurations import ClusterConfig, PluginConfig, ProbeConfig, \
-    InterfaceHolder, ProbeCompilation, ClusterCompilation
+    get_pivoting_code, get_startup_code, precompile_parse, \
+    Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
+from .configurations import ClusterConfig, PluginConfig, ProbeConfig
 from .plugins import Cluster, Plugin
 from .utility import Singleton
 from . import exceptions
@@ -41,28 +40,24 @@ class Controller(metaclass=Singleton):
     - compiling/removing programs from the interfaces
 
     All its public methods can be used both within an HTTP server, or locally by calling controller.method()
+
+    Attributes:
+        logger (Logger): The class logger
+        declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin,
+                                            its class declaration and eBPF codes (if not customizable)
+        programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index,
+                                            the object holding all eBPF programs, for each type (TC, XDP, ingress/egress)
+        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin,
+                                            an inner dictionary holding the Plugin instance, given its name
+        clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
+        custom_cp (bool): True if enabled the possibility to accept user-define Control plane code,
+                                            False otherwise. Default True.
+        is_destroyed (bool): Variable to keep track of the instance lifecycle
+        ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
+        startup (BPF): the startup eBPF compiled program, used to open perf buffers
     """
 
-    def __init__(self, log_level: int = INFO, plugins_to_load: List[str] = None):
-        """Controller class, used to manage all interactions and the state of the application.
-
-        Args:
-            log_level (int, optional): The log level of the entire application. Defaults to INFO.
-            plugins_to_load (List[str], optional): The list of plugins to active. Defaults to None (ALL).
-
-        Attributes:
-            logger (Logger): The class logger
-            declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin, its class declaration
-                and eBPF codes (if not customizable)
-            programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index, the object
-                holding all eBPF programs, for each type (TC, XDP, ingress/egress)
-            probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin, an inner dictionary
-                holding the Plugin instance, given its name
-            clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
-            is_destroyed (bool): Variable to keep track of the instance lifecycle
-            ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
-            startup (BPF): the startup eBPF compiled program, used to open perf buffers
-        """
+    def __init__(self, log_level: int = INFO, plugins_to_load: List[str] = None, custom_cp: bool = True):
         # Initializing logger
         self.__logger = getLogger(self.__class__.__name__)
         self.__logger.setLevel(log_level)
@@ -78,6 +73,7 @@ class Controller(metaclass=Singleton):
         self.__programs: Dict[int, InterfaceHolder] = {}
         self.__probes: Dict[str, Dict[str, Plugin]] = {}
         self.__clusters: Dict[str, Cluster] = {}
+        self.__custom_cp: bool = custom_cp
         self.__is_destroyed: bool = False
 
         # Initialize IpRoute and check whether there's another instance of the
@@ -141,17 +137,18 @@ class Controller(metaclass=Singleton):
         # Remove only once all kind of eBPF programs attached to all interfaces in use.
         for idx in self.__programs.keys():
             if self.__programs[idx].ingress_xdp or self.__programs[idx].egress_xdp:
-                BPF.remove_xdp(self.__programs[idx].name)
+                BPF.remove_xdp(
+                    self.__programs[idx].name, self.__programs[idx].flags)
             if self.__programs[idx].ingress_tc or self.__programs[idx].egress_tc:
                 self.__ip.tc("del", "clsact", idx)
         self.__ip.link("del", ifname="DeChainy")
 
-    def __log_and_raise(self, msg: str, exception: callable):
+    def __log_and_raise(self, msg: str, exception: Exception):
         """Method to log a message and raise the specified exception
 
         Args:
             msg (str): The message string to log
-            exception (callable): The exception to throw
+            exception (Exception): The exception to throw
 
         Raises:
             exception: The exception specified to be thrown
@@ -252,11 +249,13 @@ class Controller(metaclass=Singleton):
         if not conf.ingress and not conf.egress:
             raise NoCodeProbeException("There is no Ingress/Egress code active for this probe,"
                                        " must leave at least 1 accepted hook active")
-        if conf.cp_function:
+        if conf.cp_function and self.__custom_cp:
             module = ModuleType(f'{plugin_name}_{probe_name}')
             exec(conf.cp_function, module.__dict__)
+            if hasattr(module, "pre_compilation"):
+                module.pre_compilation(conf)
         comp = self.__compile(
-            conf, self.__declarations[plugin_name].class_declaration.get_cflags())
+            conf, self.__declarations[plugin_name].class_declaration)
         prb = self.__declarations[plugin_name].class_declaration(
             conf, module, comp)
         self.__probes[plugin_name][probe_name] = prb
@@ -295,6 +294,9 @@ class Controller(metaclass=Singleton):
             any: The return type specified in the called function
         """
         self.__check_probe_exists(plugin_name, probe_name)
+        if not self.__custom_cp:
+            raise CustomCPDisabledException(
+                "Restart the framework without `custom_cp`: false")
         try:
             return getattr(self.__probes[plugin_name][probe_name], f'{func_name}')(*argv)
         except AttributeError:
@@ -313,6 +315,11 @@ class Controller(metaclass=Singleton):
             cluster_name (str): The name of the cluster
             is_creating (bool, optional): True if function called when creating cluster. Defaults to False.
         """
+        if not self.__custom_cp:
+            self.__log_and_raise(
+                "Restart the framework without `cp_function`: false",
+                CustomCPDisabledException)
+
         if not is_creating and cluster_name not in self.__clusters:
             self.__log_and_raise(
                 f'Cluster {cluster_name} not found',
@@ -329,6 +336,10 @@ class Controller(metaclass=Singleton):
             str: The name of the cluster created
         """
         self.__check_cluster_exists(cluster_name, is_creating=True)
+        if not conf.cp_function:
+            self.__log_and_raise(
+                'No Control plane code speficied, the Cluster would not make sense',
+                ClusterWithoutCPException)
         conf.name = cluster_name
         cluster_comp = ClusterCompilation()
         for probe_config in conf.probes:
@@ -341,9 +352,10 @@ class Controller(metaclass=Singleton):
                 self.__probes[probe_config.plugin_name][probe_config.name]
         module = None
         # Loading the Control Plane function of the Cluster if any
-        if conf.cp_function:
-            module = ModuleType(cluster_name)
-            exec(conf.cp_function, module.__dict__)
+        module = ModuleType(cluster_name)
+        exec(conf.cp_function, module.__dict__)
+        if hasattr(module, "pre_compilation"):
+            module.pre_compilation(conf)
         self.__clusters[cluster_name] = plugins.Cluster(
             conf, module, cluster_comp)
         self.__logger.info(f'Successfully created Cluster {cluster_name}')
@@ -380,7 +392,7 @@ class Controller(metaclass=Singleton):
         self.__check_cluster_exists(cluster_name)
         return self.__clusters[cluster_name].__repr__()
 
-    def execute_cp_function_cluster(self, cluster_name: str, func_name: str, *argv: tuple) -> any:
+    def execute_cp_function_cluster(self, cluster_name: str, func_name: str) -> any:
         """Function to execute a Control Plane function of a cluster
 
         Args:
@@ -392,12 +404,8 @@ class Controller(metaclass=Singleton):
             any: The return type specified in the user-defined function
         """
         self.__check_cluster_exists(cluster_name)
-        try:
-            return getattr(self.__clusters[cluster_name], f'{func_name}')(*argv)
-        except AttributeError:
-            self.__log_and_raise(
-                f'Cluster {cluster_name} does not support function {func_name}',
-                exceptions.UnsupportedOperationException)
+        # This function exists by design, otherwise the Cluster would not have been created
+        return getattr(self.__clusters[cluster_name], 'exec')()
 
     ######################################################################
     # ------------- Function to manage bpf code --------------------------
@@ -442,7 +450,8 @@ class Controller(metaclass=Singleton):
         args = tuple([message.args[i] for i in range(0, decoded.count('%'))])
         formatted = decoded % args
         self.__logger.info(
-            f'CP log message from Probe({message.metadata.probe_id}) CPU({cpu}) PType({message.metadata.ptype}): {formatted}')
+            f'DP log message from Probe({message.metadata.probe_id}) CPU({cpu}) '
+            f'PType({message.metadata.ptype}) IfIndex({message.metadata.ifindex}): {formatted}')
 
     def __parse_packet(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
         """Method to parse a packet received from the Dataplane
@@ -470,11 +479,11 @@ class Controller(metaclass=Singleton):
         self.__logger.info(
             f'CP handle packet from Probe {skb_event.metadata.probe_id} CPU({cpu}) PType({skb_event.metadata.ptype})')
 
-    def __remove_probe_programs(self, conf: ProbeCompilation):
+    def __remove_probe_programs(self, conf: Union[ProbeCompilation, SwapStateCompile]):
         """Method to remove the programs associated to a specific probe
 
         Args:
-            conf (ProbeCompilation): The object containing the programs
+            conf (Union[ProbeCompilation, SwapStateCompile]): The object containing the programs
         """
         types = ["ingress", "egress"]
         self.__logger.info('Deleting Probe programs')
@@ -489,6 +498,7 @@ class Controller(metaclass=Singleton):
             type_of_interest = f'{program_type}_{mode_map_name}'
 
             target = self.__programs[program.idx][type_of_interest]
+            # TODO: dumb IDs, not safe when deleting a probe in the middle
             current_probes = len(target)
             # Checking if only two programs left into the interface, meaning
             # that also the pivoting has to be removed
@@ -502,7 +512,8 @@ class Controller(metaclass=Singleton):
                     if mode == BPF.SCHED_CLS:
                         self.__ip.tc("del", "clsact", program.idx)
                     else:
-                        BPF.remove_xdp(program.interface)
+                        BPF.remove_xdp(program.interface,
+                                       self.__programs[program.idx][0].flags)
                 continue
 
             # Retrieving the index of the Program retrieved
@@ -511,8 +522,9 @@ class Controller(metaclass=Singleton):
                 # The program is not the last one in the list, so
                 # modify program CHAIN in order that the previous program calls the
                 # following one instead of the one to be removed
-                target[0][next_map_name][program.probe_id -
-                                         1] = ct.c_int(target[index + 1].fd)
+                if not target[0][next_map_name][program.probe_id - 1].red_idx:
+                    target[0][next_map_name][program.probe_id - 1] =  \
+                        ct.c_int(target[index + 1].fd)
             else:
                 # The program is the last one in the list, so set the previous
                 # program to call the following one which will be empty
@@ -525,6 +537,8 @@ class Controller(metaclass=Singleton):
     def __inject_pivot(
             self,
             mode: int,
+            flags: int,
+            offload_device: str,
             interface: str,
             idx: int,
             program_type: str,
@@ -534,6 +548,8 @@ class Controller(metaclass=Singleton):
 
         Args:
             mode (int): The mode of the program (XDP or TC)
+            flags (int): The flags to be used in the mode
+            offload_device (str): The device to which offload the program if any
             interface (str): The desired interface
             idx (int): The index of the interface
             program_type (str): The type of the program (Ingress/Egress)
@@ -545,11 +561,11 @@ class Controller(metaclass=Singleton):
         b = BPF(
             text=get_pivoting_code(
                 mode, program_type), cflags=get_cflags(
-                mode, program_type), debug=False)
-        f = b.load_func('handler', mode)
+                mode, program_type), debug=False, device=offload_device)
+        f = b.load_func('handler', mode, device=offload_device)
 
         if mode == BPF.XDP:
-            b.attach_xdp(interface, f)
+            b.attach_xdp(interface, f, flags=flags)
         else:
             # Checking if already created the class act for the interface
             if not self.__programs[idx][f'ingress_{mode_map_name}'] \
@@ -558,14 +574,14 @@ class Controller(metaclass=Singleton):
             self.__ip.tc("add-filter", "bpf", idx, ':1', fd=f.fd, name=f.name,
                          parent=parent, classid=1, direct_action=True)
         self.__programs[idx][f'{program_type}_{mode_map_name}'].append(
-            Program(interface, idx, mode, b))
+            Program(interface, idx, mode, b, b.load_func('handler', mode).fd))
 
-    def __compile(self, config: ProbeConfig, plugin_cflags: List[str]) -> ProbeCompilation:
+    def __compile(self, config: ProbeConfig, plugin_class: Plugin) -> ProbeCompilation:
         """Internal Function to compile a probe and inject respective eBPF programs
 
         Args:
             config (ProbeConfig): The probe configuration
-            plugin_class (List[str]): The plugin class declaration belonging to the probe
+            plugin_class (Plugin): The Plugin class declaration
 
         Returns:
             ProbeCompilation: A ProbeCompilation object containing the programs and the CP function if any
@@ -574,18 +590,13 @@ class Controller(metaclass=Singleton):
         self.__logger.info(
             f'Compiling eBPF program {config.name}({config.plugin_name})')
 
-        link = self.__ip.link_lookup(ifname=config.interface)
         # Checking if the interface exists
-        if not link:
+        try:
+            idx = self.__ip.link_lookup(ifname=config.interface)[0]
+        except IndexError:
             self.__log_and_raise(
                 f'Interface {config.interface} not available',
                 UnknownInterfaceException)
-
-        idx = link[0]
-        # Checking if the interface has already been used so there's already
-        # Holder structure
-        if idx not in self.__programs:
-            self.__programs[idx] = InterfaceHolder(config.interface)
 
         # For ingress-egress
         for program_type in ["ingress", "egress"]:
@@ -595,32 +606,49 @@ class Controller(metaclass=Singleton):
                 continue
 
             # Retrieve eBPF values given Mode and program type
-            mode, mode_map_name, parent = get_bpf_values(
-                config.mode, program_type)
+            mode, flags, offload_device, mode_map_name, parent = get_bpf_values(
+                config.mode, config.flags, config.interface, program_type)
             map_of_interest = f'{program_type}_{mode_map_name}'
+
+            # Checking if the interface has already been used so there's already
+            # Holder structure
+            if idx not in self.__programs:
+                self.__programs[idx] = InterfaceHolder(
+                    config.interface, flags, offload_device)
+            elif program_type == "ingress":
+                flags, offload_device = self.__programs[idx].flags, self.__programs[idx].offload_device
 
             # If the array representing the hook is empty, inject the pivot code
             if not self.__programs[idx][map_of_interest]:
-                self.__inject_pivot(
-                    mode,
-                    config.interface,
-                    idx,
-                    program_type,
-                    mode_map_name,
-                    parent)
+                self.__inject_pivot(mode, flags, offload_device, config.interface,
+                                    idx, program_type, mode_map_name, parent)
 
             self.__logger.info(
                 f'Attaching program {config.name} to chain {program_type}, '
                 f'interface {config.interface}, mode {mode_map_name}')
             current_probes = len(self.__programs[idx][map_of_interest])
 
-            original_code, swap_code, maps = swap_compile(
-                config[program_type])
-            code_to_compile = original_code if not swap_code else get_swap_pivot()
-            cflags = plugin_cflags + get_cflags(mode,
-                                                program_type,
-                                                current_probes,
-                                                config.log_level)
+            original_code, swap_code, features = config[program_type], None, {}
+            if plugin_class.is_programmable():
+                original_code, swap_code, features = precompile_parse(
+                    config[program_type])
+
+            cflags = plugin_class.get_cflags() + config.cflags + \
+                get_cflags(mode, program_type,
+                           current_probes, config.log_level)
+
+            red_idx = None
+            if config.redirect and program_type == "ingress":
+                red_idx = self.__ip.link_lookup(ifname=config.redirect)[0]
+                cflags.append("-DNEED_REDIRECT=1")
+                if red_idx not in self.__programs:
+                    self.__programs[red_idx] = InterfaceHolder(
+                        config.redirect, flags, offload_device)
+                    self.__inject_pivot(
+                        mode, flags, offload_device, config.redirect, red_idx, program_type, mode_map_name, parent)
+                # TODO: Next instruction when needed? It always calls bpf_redirect...
+                self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][current_probes] = \
+                    ct.c_int(self.__programs[red_idx][map_of_interest][0].fd)
 
             # Compiling BPF given the formatted code, CFLAGS for the current Mode and CFLAGS
             # for the specific Plugin class if any
@@ -628,32 +656,36 @@ class Controller(metaclass=Singleton):
                 text=get_formatted_code(
                     mode,
                     program_type,
-                    code_to_compile),
+                    original_code),
                 debug=config.debug,
-                cflags=plugin_cflags + cflags)
+                cflags=cflags,
+                device=offload_device)
 
-            # Loading compiled "handle_ingress/handle_egress" function and set the previous
-            # plugin program to call in the CHAIN to the current function
-            # descriptor
-            f = b.load_func('internal_handler', mode)
-            self.__programs[idx][map_of_interest][0][
-                f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(f.fd)
-            p = Program(config.interface, idx, mode, b, f.fd, current_probes)
+            # Loading compiled "internal_handler" function and set the previous
+            # plugin program to call in the CHAIN to the current function descriptor
+            p = Program(config.interface, idx, mode, b,
+                        b.load_func('internal_handler', mode,
+                                    device=offload_device).fd,
+                        current_probes, red_idx, features)
+            ret[program_type] = p
+
+            # Updating Service Chain
+            if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
+                self.__programs[idx][map_of_interest][0][
+                    f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(p.fd)
+
+            # Compiling swap program if needed
             if swap_code:
-                b1 = BPF(text=get_formatted_code(mode, program_type, original_code),
+                b1 = BPF(text=get_formatted_code(mode, program_type, swap_code),
                          debug=config.debug,
-                         cflags=plugin_cflags + cflags)
-                b2 = BPF(text=get_formatted_code(mode, program_type, swap_code),
-                         debug=config.debug,
-                         cflags=plugin_cflags + cflags)
-                f1 = b1.load_func('internal_handler', mode)
-                f2 = b2.load_func('internal_handler', mode)
-                p1 = Program(config.interface, idx, mode,
-                             b1, f1.fd, current_probes)
-                p2 = Program(config.interface, idx, mode,
-                             b2, f2.fd, current_probes)
-                ret[program_type] = SwapStateCompile([p1, p2], p, maps)
-            else:
-                ret[program_type] = p
+                         cflags=cflags,
+                         device=offload_device)
+                p1 = Program(config.interface, idx, mode, b1,
+                             b1.load_func('internal_handler', mode,
+                                          device=offload_device).fd,
+                             current_probes, red_idx, features)
+                ret[program_type] = SwapStateCompile(
+                    [p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
+            # Append the main program to the list of programs
             self.__programs[idx][map_of_interest].append(p)
         return ret

@@ -11,11 +11,27 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+BPF_TABLE("array", int, uint64_t, TOTAL_PACKETS, 1)__attributes__((EXPORT));
 
-// programs map
-BPF_TABLE("prog", int, int, ACTIVE_PROGRAM, 1);
-
+static __always_inline
 int handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {
-  ACTIVE_PROGRAM.call(ctx, 0);
-  return PASS;
+    void *data = (void *) (long) ctx->data;
+    void *data_end = (void *) (long) ctx->data_end;
+
+   /*Parsing L2*/
+    struct eth_hdr *ethernet = data;
+    if (data + sizeof(*ethernet) > data_end)
+        return PASS;
+
+    if (ethernet->proto != bpf_htons(ETH_P_IP))
+        return PASS;
+
+    /*Parsing L3*/
+    struct iphdr *ip = data + sizeof(struct eth_hdr);
+    if (data + sizeof(struct eth_hdr) + sizeof(*ip) > data_end)
+        return PASS;
+
+    TOTAL_PACKETS.increment(0);
+
+    return PASS;
 }

@@ -81,3 +81,24 @@ class NoCodeProbeException(Exception):
     Exception to be thrown when creating a probe without at least 1 program type active
     """
     pass
+
+
+class MetricUnspecifiedException(Exception):
+    """
+    Exception to be thrown when requiring a specific metric not specified in the Adaptmon code
+    """
+    pass
+
+
+class CustomCPDisabledException(Exception):
+    """
+    Exception to be thrown when executing custom Control Plane functions that are disabled.
+    """
+    pass
+
+
+class ClusterWithoutCPException(Exception):
+    """
+    Exception to be thrown when creating a cluster without specifying a custom Control plane code
+    """
+    pass

@@ -20,18 +20,18 @@ Each packet belonging to a specific session (max. 10000 session, can be modified
 * server_ip: the IP of the server
 * method: the method used to determine the server
 
-These values will be later post-processed by the Control Plane, as described in the following section.
+These values will be later post-processed by the control Plane, as described in the following section.
 
 ## Control Plane
 
-Periodically, the Control Plane swaps the current eBPF map and reads the gathered data from the map that has been swapped-out, meaning that it is not active anymore.
+Periodically, the control plane swaps the current eBPF map and reads the gathered data from the map that has been swapped-out, meaning that it is not active anymore.
 For each session, it aggregates each PER-CPU data into a unique entry, by:
 
 * summing up n_packets, n_packets_reverse, n_bits, n_bits_reverse
 * saving the value for method != 0, start_timestamp != 0, and server_ip !=0
 * storing the latest alive_timestamp measured
 
-Once aggregated data, the Control Plane computes and prints all the following values:
+Once aggregated data, the control plane computes and prints all the following values:
 
 * the last timestamp belonging to the connection
 * the method used to identify the server

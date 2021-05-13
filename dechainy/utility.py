@@ -11,9 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ctypes as ct
+
 from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
-from re import sub
+from re import sub, DOTALL
 from threading import Thread, Event
 from typing import Callable
 
@@ -26,7 +28,11 @@ class Dict(dict):
 
 
 class Singleton(type):
-    """Metatype utility class to define a Singleton Pattern"""
+    """Metatype utility class to define a Singleton Pattern
+
+    Attributes:
+        _instance(object): The instance of the Singleton
+    """
     _instance: object = None
 
     def __call__(cls, *args, **kwargs):
@@ -48,14 +54,13 @@ class CPThread(Thread):
         func (Callable): The function to be executed
         args (tuple): The arguments provided to the function
         time_window (int): The timeout used for the thread to re-start
-
     """
 
-    def __init__(self, target: Callable, args: tuple, time_window: int):
+    def __init__(self, target: Callable, args: tuple, time_window: float):
         super().__init__(target=target, args=args)
         self.__func: Callable = target
         self.__args: tuple = args
-        self.__timeout: int = time_window
+        self.__timeout: float = time_window
         self.__stop_event: Event = Event()
         self.daemon: bool = True
 
@@ -80,7 +85,9 @@ def remove_c_comments(text: str) -> str:
         str: the string sanitized from comments
     """
     return sub(r"""(?:\/\/(?:\\\n|[^\n])*\n)|(?:\/\*[\s\S]*?\*\/)|((?:R"([^(\\\s]{0,16})\([^)]*\)\2")|"""
-               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1", text)
+               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1",
+               text,
+               flags=DOTALL)
 
 
 # Simple dictionary containing protocol names and their integer value
@@ -167,3 +174,46 @@ def port_to_host_int(port: int) -> int:
         int: the little endian representation of the port
     """
     return ntohs(port)
+
+
+def ctype_to_normal(obj: any) -> any:
+    """Function to convert a ctype object into a Python Serializable one
+
+    Args:
+        obj (any): The ctypes object to be converted
+
+    Returns:
+        any: The object converted
+    """
+    if obj is None:
+        return obj
+
+    if isinstance(obj, (bool, int, float, str)):
+        return obj
+
+    if isinstance(obj, (ct.Array, list)):
+        return [ctype_to_normal(e) for e in obj]
+
+    if isinstance(obj, ct._Pointer):
+        return ctype_to_normal(obj.contents) if obj else None
+
+    if isinstance(obj, ct._SimpleCData):
+        return ctype_to_normal(obj.value)
+
+    if isinstance(obj, (ct.Structure, ct.Union)):
+        result = {}
+        anonymous = getattr(obj, '_anonymous_', [])
+
+        for key, _ in getattr(obj, '_fields_', []):
+            value = getattr(obj, key)
+
+            # private fields don't encode
+            if key.startswith('_'):
+                continue
+
+            if key in anonymous:
+                result.update(ctype_to_normal(value))
+            else:
+                result[key] = ctype_to_normal(value)
+
+        return result

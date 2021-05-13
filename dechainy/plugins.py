@@ -11,16 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import ctypes as ct
+
 from math import ceil
 from types import ModuleType
 from typing import List, Union
 from json import dumps
-import ctypes as ct
+from bcc.table import QueueStack, ArrayBase, TableBase
 
-from .exceptions import HookDisabledException
-from .configurations import ClusterCompilation, ClusterConfig, FirewallRule, MitigatorRule, ProbeCompilation, ProbeConfig
-from .ebpf import BPF, LpmKey, Program
-from .utility import Dict, CPThread, protocol_to_int, ipv4_to_network_int, port_to_network_int
+from .exceptions import HookDisabledException, MetricUnspecifiedException
+from .configurations import ClusterConfig, FirewallRule, MetricFeatures, MitigatorRule, ProbeConfig
+from .ebpf import BPF, LpmKey, Program, SwapStateCompile, ProbeCompilation, ClusterCompilation, is_batch_supp
+from .utility import Dict, CPThread, protocol_to_int, ipv4_to_network_int, port_to_network_int, ctype_to_normal
 
 
 class BaseEntity:
@@ -46,9 +48,9 @@ class BaseEntity:
         self._module: ModuleType = module
         self._config: Union[ProbeConfig, ClusterConfig] = config
         self.programs: Union[ProbeCompilation, ClusterCompilation] = programs
-        # If the module has a setup function, call it
-        if hasattr(module, "setup"):
-            module.setup(self)
+        # If the module has a post_compilation function, call it
+        if hasattr(module, "post_compilation"):
+            module.post_compilation(self)
         # If required, run local thread to execute non-REST function
         if hasattr(module, "reaction_function"):
             self._thread = CPThread(
@@ -88,15 +90,6 @@ class BaseEntity:
             Union[str, Program]: the name of the probe for the plugin (key) if Cluster, else the compiled Program
         """
         return self.programs[key] if not self._is_destroyed else exit(1)
-
-    @staticmethod
-    def get_cflags() -> List[str]:
-        """Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
-
-        Returns:
-            List[str]: The list of cflags for the specified Plugin
-        """
-        return []
 
 
 class Cluster(BaseEntity):
@@ -164,6 +157,15 @@ class Plugin(BaseEntity):
         """
         return False
 
+    @staticmethod
+    def get_cflags() -> List[str]:
+        """Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
+
+        Returns:
+            List[str]: The list of cflags for the specified Plugin
+        """
+        return []
+
 
 class Adaptmon(Plugin):
     """Programmable network probe, accepting user-define eBPF code and Control Plane"""
@@ -171,6 +173,90 @@ class Adaptmon(Plugin):
     @staticmethod
     def is_programmable():
         return True
+
+    def __do_retrieve_metric(map_ref: Union[QueueStack, TableBase], features: List[MetricFeatures]) -> any:
+        """Internal function to retrieve data from the eBPF map
+
+        Args:
+            map_ref (Union[QueueStack, TableBase]): The reference to the eBPF map
+            features (List[MetricFeatures]): The features associated to the map
+
+        Returns:
+            any: The list of values if multiple ones, or just the first one if it is the only one
+        """
+        ret = []
+        if isinstance(map_ref, QueueStack):
+            ret = [ctype_to_normal(x) for x in map_ref.values()]
+        elif isinstance(map_ref, ArrayBase):
+            ret = [ctype_to_normal(v) for _, v in map_ref.items_lookup_batch(
+            )] if is_batch_supp() else [ctype_to_normal(v) for v in map_ref.values()]
+            if features.empty:
+                length = len(ret)
+                keys = (map_ref.Key * length)()
+                new_values = (map_ref.Leaf * length)()
+                holder = map_ref.Leaf()
+                for i in range(length):
+                    keys[i] = ct.c_int(i)
+                    new_values[i] = holder
+                map_ref.items_update_batch(keys, new_values)
+        else:
+            exception = False
+            if is_batch_supp():
+                try:
+                    for k, v in map_ref.items_lookup_and_delete_batch() if features.empty else map_ref.items_lookup_batch():
+                        ret.append((ctype_to_normal(k), ctype_to_normal(v)))
+                except Exception:
+                    exception = True
+            if not ret and exception:
+                for k, v in map_ref.items():
+                    ret.append((ctype_to_normal(k), ctype_to_normal(v)))
+                    if features.empty:
+                        del map_ref[k]
+        return str(ret[0]) if len(ret) == 1 else ret
+
+    def retrieve_metric(self, program_type: str, metric_name: str) -> any:
+        """Function to retrieve the value of a specific metric.
+
+        Args:
+            program_type (str): The program type (Ingress/Egress)
+            metric_name (str): The name of the metric.
+
+        Returns:
+            any: The value of the metric.
+        """
+        self._check_hook_active(program_type)
+        if isinstance(self.programs[program_type], SwapStateCompile):
+            self.programs[program_type].trigger_read()
+
+        features = self.programs[program_type].features[metric_name]
+
+        if not features.export:
+            raise MetricUnspecifiedException(
+                f"Metric {metric_name} unspecified")
+
+        return self.__do_retrieve_metric(self.programs[program_type][metric_name], features)
+
+    def retrieve_metrics(self, program_type: str) -> any:
+        """Function to retrieve the value of all metrics.
+
+        Args:
+            program_type (str): The program type (Ingress/Egress)
+
+        Returns:
+            any: The value of the metrics.
+        """
+        self._check_hook_active(program_type)
+
+        if isinstance(self.programs[program_type], SwapStateCompile):
+            self.programs[program_type].trigger_read()
+
+        ret = {}
+        for map_name, features in self.programs[program_type].features.items():
+            if not features.export:
+                continue
+            ret[map_name] = self.__do_retrieve_metric(
+                self.programs[program_type][map_name], features)
+        return ret
 
 
 class Mitigator(Plugin):

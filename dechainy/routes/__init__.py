@@ -51,6 +51,8 @@ def manage_clusters(cluster_name: str) -> Union[ClusterConfig, str]:
         return controller.create_cluster(cluster_name, ClusterConfig(config))
     except (exceptions.ClusterNotFoundException, exceptions.NoCodeProbeException) as e:
         abort(404, e)
+    except (exceptions.CustomCPDisabledException, exceptions.ClusterWithoutCPException) as e:
+        abort(400, e)
 
 
 @bp.route('/clusters/<cluster_name>/exec')
@@ -64,10 +66,10 @@ def exec_cluster_custom_cp(cluster_name: str) -> any:
         any: The value specified in the user-defined function
     """
     try:
-        return controller.execute_cp_function_cluster(cluster_name, 'exec')
+        return controller.execute_cp_function_cluster(cluster_name)
     except exceptions.ClusterNotFoundException as e:
         abort(404, e)
-    except exceptions.UnsupportedOperationException as e:
+    except (exceptions.UnsupportedOperationException, exceptions.CustomCPDisabledException) as e:
         abort(400, e)
 
 

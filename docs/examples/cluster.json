@@ -1,19 +1,14 @@
 {
-  "plugins": [
-    "mitigator",
-    "adaptmon"
-  ],
   "clusters": [
     {
       "name": "cluster1",
-      "time_window": 2,
       "cp_function": "# Copyright 2020 DeChainy\n#\n# Licensed under the Apache License, Version 2.0 (the \"License\");\n# you may not use this file except in compliance with the License.\n# You may obtain a copy of the License at\n#\n#    http://www.apache.org/licenses/LICENSE-2.0\n#\n# Unless required by applicable law or agreed to in writing, software\n# distributed under the License is distributed on an \"AS IS\" BASIS,\n# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n# See the License for the specific language governing permissions and\n# limitations under the License.\nimport json\n\nfrom dechainy.configurations import MitigatorRule\nfrom dechainy.plugins import Cluster\nfrom dechainy.utility import ipv4_to_string\n\ncounter: int = 0\n\n\ndef reaction_function_rest(cluster: Cluster):\n    global counter\n    counter += 1\n\n    cnt_ingress = cluster['adaptmon']['pkt_counter'][\"ingress\"]['TOTAL_PACKETS'][0].value\n    cnt_egress = cluster['adaptmon']['pkt_counter'][\"egress\"]['TOTAL_PACKETS'][0].value\n    rules = {}\n    # NB: it is possible to call the probe specific control plane method instead of directly\n    #     accessing the map. Thus, pay attention to what you do.\n    for key, cnt in cluster['mitigator']['probe'][\"ingress\"]['BLACKLISTED_IPS'].items():\n        rules[f\"{ipv4_to_string(key.ip)}/{key.netmask_len}\"] = cnt.value\n\n    return {\n        'pkt_ingress': cnt_ingress,\n        'pkt_egress': cnt_egress,\n        'mitigator_rules': rules}\n\n\ndef reaction_function(cluster: Cluster):\n    global counter\n\n    ret = reaction_function_rest(cluster)\n\n    print('------------------------------\\n'\n          f'Packet Counter: Ingress({ret[\"pkt_ingress\"]}) Egress({ret[\"pkt_egress\"]})\\n'\n          f'Mitigator: {json.dumps(ret[\"mitigator_rules\"], indent=2)}')\n\n    if ret['pkt_ingress'] > 10 and not ret['mitigator_rules']:\n        print('Filling map with rule')\n        # NB: it is possible to directly access the eBPF map, but then the rule would not be pushed into\n        #     the Python class. Thus, pay attention to what you do.\n        cluster[\"mitigator\"][\"probe\"].insert(MitigatorRule({\"netmask\": 32, \"ip\": \"8.8.8.8\"}))\n    print('', flush=True)\n",
       "probes": [
         {
           "plugin": "adaptmon",
           "name": "pkt_counter",
           "mode": "XDP",
-          "interface": "wlp59s0",
+          "interface": "wlp0s20f3",
           "ingress": "// Copyright 2020 DeChainy\n//\n// Licensed under the Apache License, Version 2.0 (the \"License\");\n// you may not use this file except in compliance with the License.\n// You may obtain a copy of the License at\n//\n//    http://www.apache.org/licenses/LICENSE-2.0\n//\n// Unless required by applicable law or agreed to in writing, software\n// distributed under the License is distributed on an \"AS IS\" BASIS,\n// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n// See the License for the specific language governing permissions and\n// limitations under the License.\nBPF_TABLE(\"array\", int, uint64_t, TOTAL_PACKETS, 1);\n\nstatic __always_inline\nint handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {\n    void *data = (void *) (long) ctx->data;\n    void *data_end = (void *) (long) ctx->data_end;\n\n   /*Parsing L2*/\n    struct eth_hdr *ethernet = data;\n    if (data + sizeof(*ethernet) > data_end)\n        return PASS;\n\n    if (ethernet->proto != bpf_htons(ETH_P_IP))\n        return PASS;\n\n    /*Parsing L3*/\n    struct iphdr *ip = data + sizeof(struct eth_hdr);\n    if (data + sizeof(struct eth_hdr) + sizeof(*ip) > data_end)\n        return PASS;\n\n    TOTAL_PACKETS.increment(0);\n\n    return PASS;\n}",
           "egress": "// Copyright 2020 DeChainy\n//\n// Licensed under the Apache License, Version 2.0 (the \"License\");\n// you may not use this file except in compliance with the License.\n// You may obtain a copy of the License at\n//\n//    http://www.apache.org/licenses/LICENSE-2.0\n//\n// Unless required by applicable law or agreed to in writing, software\n// distributed under the License is distributed on an \"AS IS\" BASIS,\n// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n// See the License for the specific language governing permissions and\n// limitations under the License.\nBPF_TABLE(\"array\", int, uint64_t, TOTAL_PACKETS, 1);\n\nstatic __always_inline\nint handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {\n    void *data = (void *) (long) ctx->data;\n    void *data_end = (void *) (long) ctx->data_end;\n\n   /*Parsing L2*/\n    struct eth_hdr *ethernet = data;\n    if (data + sizeof(*ethernet) > data_end)\n        return PASS;\n\n    if (ethernet->proto != bpf_htons(ETH_P_IP))\n        return PASS;\n\n    /*Parsing L3*/\n    struct iphdr *ip = data + sizeof(struct eth_hdr);\n    if (data + sizeof(struct eth_hdr) + sizeof(*ip) > data_end)\n        return PASS;\n\n    TOTAL_PACKETS.increment(0);\n\n    return PASS;\n}"
         },
@@ -21,7 +16,7 @@
           "plugin": "mitigator",
           "name": "probe",
           "mode": "XDP",
-          "interface": "wlp59s0"
+          "interface": "wlp0s20f3"
         }
       ]
     }

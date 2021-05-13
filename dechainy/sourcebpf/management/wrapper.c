@@ -15,6 +15,15 @@
 // extern programs map
 BPF_TABLE("extern", int, int, PROGRAM_TYPE_next_MODE, MAX_PROGRAMS_PER_HOOK);
 
+// redirect table, containing the index of the next interface
+#ifdef PTYPE == 0
+#ifdef XDP
+BPF_DEVMAP(DEVMAP, 1);
+#else
+BPF_TABLE("array", int, int, DEVMAP, 1);
+#endif
+#endif
+
 // Function called, defined by user
 static __always_inline
 int handler(struct CTXTYPE *ctx, struct pkt_metadata *md);
@@ -22,9 +31,9 @@ int handler(struct CTXTYPE *ctx, struct pkt_metadata *md);
 // Hook handler wrapper, to call the apposite function
 int internal_handler(struct CTXTYPE *ctx) {
   struct pkt_metadata md = {ctx->ingress_ifindex, PTYPE, PROBE_ID};
-
+  
   int rc = handler(ctx, &md);
-
+  
   switch (rc) {
     case DROP:
       return DROP;
@@ -33,9 +42,27 @@ int internal_handler(struct CTXTYPE *ctx) {
       break;
     }
     case REDIRECT: {
-      // TODO: implement redirect
+// Return explicitly redirect, then if ingress ok
+#if PTYPE == 0
+#ifdef XDP
+      return DEVMAP.redirect_map(0, 0);
+#else
+      int zero = 0;
+      u32 *ifindex = DEVMAP.lookup(&zero);
+      if (ifindex) {
+        return bpf_redirect(*ifindex, 0);  
+      }
+      PROGRAM_TYPE_next_MODE.call(ctx, md.probe_id);
+#endif
+#endif
       break;
     }
+#if PTYPE == 0  && XDP
+    // The packet can be redirect in TX only in XDP
+    case BACK_TX: {
+      return BACK_TX;
+    }
+#endif
     default: break;
   }
   return PASS;

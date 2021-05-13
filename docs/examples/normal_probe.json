@@ -1,0 +1,14 @@
+{
+    "probes": [
+      {
+        "plugin": "firewall",
+        "name": "simple_fw",
+        "mode": "XDP",
+        "interface": "wlp0s20f3"
+      }
+    ],
+    "server": {
+      "address": "0.0.0.0",
+      "port": 8080
+    }
+  }

@@ -21,7 +21,7 @@ jobs:
       - name: Installing Flake8
         run: sudo pip3 install flake8
       - name: Lint with flake8
-        run: sudo flake8 . --count --max-complexity=12 --max-line-length=127 --statistics
+        run: sudo flake8 . --count --max-complexity=13 --max-line-length=127 --statistics
 
   markdown-lint:
     name: Lint markdown files (check links validity)
