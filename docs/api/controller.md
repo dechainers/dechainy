@@ -4,28 +4,24 @@ Module dechainy.controller
 Classes
 -------
 
-`Controller(log_level: int = 20, plugins_to_load: List[str] = None)`
+`Controller(log_level: int = 20, plugins_to_load: List[str] = None, custom_cp: bool = True)`
 :   Singleton Controller class responsible of:
     - keeping track of clusters, probes and programs
     - compiling/removing programs from the interfaces
     
     All its public methods can be used both within an HTTP server, or locally by calling controller.method()
     
-    Controller class, used to manage all interactions and the state of the application.
-    
-    Args:
-        log_level (int, optional): The log level of the entire application. Defaults to INFO.
-        plugins_to_load (List[str], optional): The list of plugins to active. Defaults to None (ALL).
-    
     Attributes:
         logger (Logger): The class logger
-        declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin, its class declaration
-            and eBPF codes (if not customizable)
-        programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index, the object
-            holding all eBPF programs, for each type (TC, XDP, ingress/egress)
-        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin, an inner dictionary
-            holding the Plugin instance, given its name
+        declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin,
+                                            its class declaration and eBPF codes (if not customizable)
+        programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index,
+                                            the object holding all eBPF programs, for each type (TC, XDP, ingress/egress)
+        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin,
+                                            an inner dictionary holding the Plugin instance, given its name
         clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
+        custom_cp (bool): True if enabled the possibility to accept user-define Control plane code,
+                                            False otherwise. Default True.
         is_destroyed (bool): Variable to keep track of the instance lifecycle
         ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
         startup (BPF): the startup eBPF compiled program, used to open perf buffers
@@ -75,7 +71,7 @@ Classes
         Returns:
             str: The name of the probe deleted
 
-    `execute_cp_function_cluster(self, cluster_name: str, func_name: str, *argv: tuple) ‑> <built-in function any>`
+    `execute_cp_function_cluster(self, cluster_name: str, func_name: str) ‑> <built-in function any>`
     :   Function to execute a Control Plane function of a cluster
         
         Args:

@@ -25,7 +25,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Build and push
         run: |
-          docker build -f Dockerfile.docgen -t s41m0n/dechainy:docgen .
+          docker build --no-cache -f Dockerfile.docgen -t s41m0n/dechainy:docgen .
           docker image push s41m0n/dechainy:docgen
 
   docker-test:

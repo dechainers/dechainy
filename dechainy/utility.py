@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes as ct
+import re
 
 from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
@@ -76,7 +77,8 @@ class CPThread(Thread):
 
 def remove_c_comments(text: str) -> str:
     """Function to remove C-like comments, working also in trickiest cases
-    Useful link: https://stackoverflow.com/questions/36454069/how-to-remove-c-style-comments-from-code
+    [New] Useful link: https://gist.github.com/ChunMinChang/88bfa5842396c1fbbc5b
+    [Old] Useful link: https://stackoverflow.com/questions/36454069/how-to-remove-c-style-comments-from-code
 
     Args:
         text (str): the original text with comments
@@ -84,10 +86,15 @@ def remove_c_comments(text: str) -> str:
     Returns:
         str: the string sanitized from comments
     """
-    return sub(r"""(?:\/\/(?:\\\n|[^\n])*\n)|(?:\/\*[\s\S]*?\*\/)|((?:R"([^(\\\s]{0,16})\([^)]*\)\2")|"""
-               r"""(?:@"[^"]*?")|(?:"(?:\?\?'|\\\\|\\"|\\\n|[^"])*?")|(?:'(?:\\\\|\\'|\\\n|[^'])*?'))""", "\\1",
-               text,
-               flags=DOTALL)
+    def replacer(match):
+        s = match.group(0)
+        # note: a space and not an empty string
+        return " " if s.startswith('/') else s
+    pattern = re.compile(
+        r'//.*?$|/\*.*?\*/|\'(?:\\.|[^\\\'])*\'|"(?:\\.|[^\\"])*"',
+        re.DOTALL | re.MULTILINE
+    )
+    return re.sub(pattern, replacer, text)
 
 
 # Simple dictionary containing protocol names and their integer value

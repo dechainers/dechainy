@@ -4,7 +4,7 @@ Module dechainy.plugins
 Classes
 -------
 
-`Adaptmon(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.configurations.ProbeCompilation)`
+`Adaptmon(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.ebpf.ProbeCompilation)`
 :   Programmable network probe, accepting user-define eBPF code and Control Plane
 
     ### Ancestors (in MRO)
@@ -12,7 +12,28 @@ Classes
     * dechainy.plugins.Plugin
     * dechainy.plugins.BaseEntity
 
-`BaseEntity(config: Union[dechainy.configurations.ProbeConfig, dechainy.configurations.ClusterConfig], module: module, programs: Union[dechainy.configurations.ProbeCompilation, dechainy.configurations.ClusterCompilation])`
+    ### Methods
+
+    `retrieve_metric(self, program_type: str, metric_name: str) ‑> <built-in function any>`
+    :   Function to retrieve the value of a specific metric.
+        
+        Args:
+            program_type (str): The program type (Ingress/Egress)
+            metric_name (str): The name of the metric.
+        
+        Returns:
+            any: The value of the metric.
+
+    `retrieve_metrics(self, program_type: str) ‑> <built-in function any>`
+    :   Function to retrieve the value of all metrics.
+        
+        Args:
+            program_type (str): The program type (Ingress/Egress)
+        
+        Returns:
+            any: The value of the metrics.
+
+`BaseEntity(config: Union[dechainy.configurations.ProbeConfig, dechainy.configurations.ClusterConfig], module: module, programs: Union[dechainy.ebpf.ProbeCompilation, dechainy.ebpf.ClusterCompilation])`
 :   Base class to define an entity (Plugin or Cluster) with many properties in common.
     
     Args:
@@ -32,14 +53,6 @@ Classes
     * dechainy.plugins.Cluster
     * dechainy.plugins.Plugin
 
-    ### Static methods
-
-    `get_cflags() ‑> List[str]`
-    :   Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
-        
-        Returns:
-            List[str]: The list of cflags for the specified Plugin
-
     ### Methods
 
     `exec(self) ‑> <built-in function any>`
@@ -51,7 +64,7 @@ Classes
         Returns:
             any: The return type specified in the user-define REST function
 
-`Cluster(config: Union[dechainy.configurations.ProbeConfig, dechainy.configurations.ClusterConfig], module: module, programs: Union[dechainy.configurations.ProbeCompilation, dechainy.configurations.ClusterCompilation])`
+`Cluster(config: Union[dechainy.configurations.ProbeConfig, dechainy.configurations.ClusterConfig], module: module, programs: Union[dechainy.ebpf.ProbeCompilation, dechainy.ebpf.ClusterCompilation])`
 :   Cluster entity class, to represent a group of probes.
     
     Args:
@@ -63,7 +76,7 @@ Classes
 
     * dechainy.plugins.BaseEntity
 
-`Firewall(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.configurations.ProbeCompilation)`
+`Firewall(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.ebpf.ProbeCompilation)`
 :   Firewall class, an eBPF implementation of an iptables-like one.
 
     ### Ancestors (in MRO)
@@ -182,7 +195,7 @@ Classes
         Returns:
             str: The id of the rule
 
-`Mitigator(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.configurations.ProbeCompilation)`
+`Mitigator(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.ebpf.ProbeCompilation)`
 :   Mitigator class, an eBPF implementation of an IP/Netmask mitigator.
 
     ### Ancestors (in MRO)
@@ -278,7 +291,7 @@ Classes
         Returns:
             str: The ID of the updated rule
 
-`Plugin(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.configurations.ProbeCompilation)`
+`Plugin(config: dechainy.configurations.ProbeConfig, module: module, programs: dechainy.ebpf.ProbeCompilation)`
 :   Base Class representing all Plugin entities.
     
     Args:
@@ -303,6 +316,12 @@ Classes
         
         Returns:
             List[str]: The list of accepted hooks
+
+    `get_cflags() ‑> List[str]`
+    :   Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
+        
+        Returns:
+            List[str]: The list of cflags for the specified Plugin
 
     `is_programmable() ‑> bool`
     :   Function to check whether the Probe supports user-defined eBPF code

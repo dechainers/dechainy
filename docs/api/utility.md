@@ -5,6 +5,16 @@ Functions
 ---------
 
     
+`ctype_to_normal(obj: <built-in function any>) ‑> <built-in function any>`
+:   Function to convert a ctype object into a Python Serializable one
+    
+    Args:
+        obj (any): The ctypes object to be converted
+    
+    Returns:
+        any: The object converted
+
+    
 `ipv4_to_network_int(address: str) ‑> int`
 :   Function to conver an IPv4 address string into network byte order integer
     
@@ -81,7 +91,7 @@ Functions
 Classes
 -------
 
-`CPThread(target: Callable, args: tuple, time_window: int)`
+`CPThread(target: Callable, args: tuple, time_window: float)`
 :   Utility class to create a daemon thread (stopped when destroying its proprietary)
     to execute a function locally every time_window.
     
@@ -137,18 +147,21 @@ Classes
     ### Descendants
 
     * dechainy.configurations.AppConfig
-    * dechainy.configurations.ClusterCompilation
     * dechainy.configurations.ClusterConfig
     * dechainy.configurations.FirewallRule
-    * dechainy.configurations.InterfaceHolder
     * dechainy.configurations.MitigatorRule
     * dechainy.configurations.PluginConfig
-    * dechainy.configurations.ProbeCompilation
     * dechainy.configurations.ProbeConfig
     * dechainy.configurations.ServerConfig
+    * dechainy.ebpf.ClusterCompilation
+    * dechainy.ebpf.InterfaceHolder
+    * dechainy.ebpf.ProbeCompilation
 
 `Singleton(*args, **kwargs)`
 :   Metatype utility class to define a Singleton Pattern
+    
+    Attributes:
+        _instance(object): The instance of the Singleton
 
     ### Ancestors (in MRO)
 

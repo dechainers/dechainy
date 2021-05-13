@@ -3,6 +3,7 @@ Module dechainy.routes
 
 Sub-modules
 -----------
+* dechainy.routes.adaptmon
 * dechainy.routes.firewall
 * dechainy.routes.mitigator
 

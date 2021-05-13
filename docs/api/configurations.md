@@ -12,19 +12,8 @@ Classes
         cluster (List[ClusterConfig]): List of clusters to create at startup. Default [].
         probes (List[ProbeConfig]): List of probes to create at startup. Default [].
         server (ServerConfig): Server configuration, if any. Default None.
+        custom_cp (bool): True if the system can accept custom Control plane code, False otherwise. Default True.
         log_level (int): Log level for the entire application. Default INFO.
-
-    ### Ancestors (in MRO)
-
-    * dechainy.utility.Dict
-    * builtins.dict
-
-`ClusterCompilation(*args, **kwargs)`
-:   Class to represent a compilation of a Cluster object.
-    
-    Attributes:
-        key (str): The name of the plugin
-        value (List[Plugin]): List of probes for that specific plugin
 
     ### Ancestors (in MRO)
 
@@ -36,7 +25,7 @@ Classes
     
     Attributes:
         probes (List[ProbeConfig]): List of probes componing the cluster. Default [].
-        time_window (int): periodic time to run the control plane function, if any. Default 10.
+        time_window (float): periodic time to run the control plane function, if any. Default 10.
         cp_function (str): The cluster Controlplane function. Default None.
         name (str): The name of the cluster. Default None.
 
@@ -44,6 +33,30 @@ Classes
 
     * dechainy.utility.Dict
     * builtins.dict
+
+`DPLogLevel(value, names=None, *, module=None, qualname=None, type=None, start=1)`
+:   Class to represent the log level of a datapath program.
+
+    ### Ancestors (in MRO)
+
+    * enum.Enum
+
+    ### Class variables
+
+    `LOG_DEBUG`
+    :
+
+    `LOG_ERR`
+    :
+
+    `LOG_INFO`
+    :
+
+    `LOG_OFF`
+    :
+
+    `LOG_WARN`
+    :
 
 `FirewallRule(obj: dict = None)`
 :   Class to represent a firewall iptable-like rule
@@ -61,27 +74,20 @@ Classes
     * dechainy.utility.Dict
     * builtins.dict
 
-`InterfaceHolder(name: str)`
-:   Simple class to store information concerning the programs attached to an interface
+`MetricFeatures(swap: bool = False, empty: bool = False, export: bool = False)`
+:   Class to represent all the possible features for an Adaptmon metric
     
     Attributes:
-        name (str): The name of the interface
-        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
-        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
-        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
-        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
-
-    ### Ancestors (in MRO)
-
-    * dechainy.utility.Dict
-    * builtins.dict
+        swap(bool): True if the metric requires swapping programs, False otherwise
+        empty(bool): True if the metric needs to be emptied, False otherwise
+        export(bool): True if the metric needs to be exported, False otherwise
 
 `MitigatorRule(obj: dict = None)`
 :   Class to represent a mitigator rule
     
     Attributes:
         ip (str): The Ip to block
-        netmask (str): The length of the netmask. Default 32.
+        netmask (int): The length of the netmask. Default 32.
 
     ### Ancestors (in MRO)
 
@@ -101,30 +107,21 @@ Classes
     * dechainy.utility.Dict
     * builtins.dict
 
-`ProbeCompilation()`
-:   Class representing the compilation object of a Probe
-    
-    Attributes:
-        cp_function (ModuleType): The module containing the optional Controlplane functions
-        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
-        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
-
-    ### Ancestors (in MRO)
-
-    * dechainy.utility.Dict
-    * builtins.dict
-
 `ProbeConfig(obj: dict = None)`
 :   Class to represent a Probe configuration.
     
     Attributes:
         interface (str): The interface to which attach the program
         mode (int): The mode to insert the program (XDP or TC). Default TC.
-        time_window (int): Periodic time to locally call the Controlplane function, if any. Default 10.
+        flags (int): Flags for the mode, automatically computed.
+        time_window (float): Periodic time to locally call the Controlplane function, if any. Default 10.
         ingress (str): Code for the ingress hook. Default None.
         egress (str): Code for the egress hook. Default None.
+        cp_function (str): The Control plane routine to be periodically executed if needed. Default "".
+        cflags (List[str]): List of Cflags to be used while compiling programs. Default [].
         files (Dict[str, str]): Dictionary containing additional files for the probe. Default {}.
         debug (bool): True if the probe must be inserted in debug mode. Default False.
+        redirect(str): The name of the interface you want packets to be redirect as default action, else None
         plugin_name (str): The name of the plugin. Default None. (Set by Controller)
         name (str): The name of the probe. Default None. (Set by Controller)
         is_in_cluster (bool): True if the probe is inside a cluster. Default False. (Set by Controller)

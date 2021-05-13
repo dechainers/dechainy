@@ -12,8 +12,32 @@ Classes
     * builtins.Exception
     * builtins.BaseException
 
+`ClusterWithoutCPException(*args, **kwargs)`
+:   Exception to be thrown when creating a cluster without specifying a custom Control plane code
+
+    ### Ancestors (in MRO)
+
+    * builtins.Exception
+    * builtins.BaseException
+
+`CustomCPDisabledException(*args, **kwargs)`
+:   Exception to be thrown when executing custom Control Plane functions that are disabled.
+
+    ### Ancestors (in MRO)
+
+    * builtins.Exception
+    * builtins.BaseException
+
 `HookDisabledException(*args, **kwargs)`
 :   Exception to be thrown when performing operations on a hook that has been disabled in the probe config
+
+    ### Ancestors (in MRO)
+
+    * builtins.Exception
+    * builtins.BaseException
+
+`MetricUnspecifiedException(*args, **kwargs)`
+:   Exception to be thrown when requiring a specific metric not specified in the Adaptmon code
 
     ### Ancestors (in MRO)
 
