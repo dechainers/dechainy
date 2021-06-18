@@ -24,7 +24,7 @@ from base64 import b64decode
 from collections import OrderedDict
 from typing import Dict, List
 
-from keras.models import load_model
+from tensorflow.keras.models import load_model
 from bcc.table import QueueStack, TableBase
 
 from dechainy.utility import ipv4_to_string, port_to_host_int, protocol_to_string
@@ -161,8 +161,7 @@ def extract_packets(queue: QueueStack) -> List[any]:
     global feature_list
     flows = {}
     try:
-        while True:
-            val = queue.pop()
+        for val in queue.values():
             flow_id = (val.id.saddr, val.id.sport,
                        val.id.daddr, val.id.dport, val.id.proto)
 
@@ -217,11 +216,11 @@ def reaction_function(probe: Plugin):
 def pre_compilation(config: ProbeConfig):
     global feature_list, MAX_FLOW_LEN, model
 
-    if 'model' not in config.files:
+    if 'model' not in config.extra:
         raise Exception("No Model has been specified")
 
     # Storing the model into a temporary file
-    model_path = config.files['model']
+    model_path = config.extra['model']
     if not os.path.isfile(model_path):
         content = model_path
         model_path = "/tmp/model"

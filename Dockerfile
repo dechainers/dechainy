@@ -52,6 +52,8 @@ RUN \
   apt update -y && \
   apt install -y libncurses5 binutils python python3.9 python3-pip libelf1 kmod  && \
   pip3 install dnslib cachetools  && \
+  rm -f /usr/bin/python3 && \
+  ln -s /usr/bin/python3.9 /usr/bin/python3 && \
   if [ "$BUILDTYPE" = "test" ] ; then       \
     apt install -y python3-pytest &&        \
     pip3 install pytest flake8;              \
@@ -61,19 +63,16 @@ RUN \
   if [ "$BUILDTYPE" = "ml" ] ; then \
     if [ $(arch) = "aarch64" ]; then \
       apt install -y python3.9-dev curl build-essential pkg-config libhdf5-dev && \
-      rm -f /usr/bin/python3 && \
-      ln -s /usr/bin/python3.9 /usr/bin/python3 && \
       curl -sc /tmp/cookie "https://drive.google.com/uc?export=download&id=1EsObTazsUxmIBj-37L3I2hTdXvVItQD8" > /dev/null && \
       CODE="$(awk '/_warning_/ {print $NF}' /tmp/cookie)" && \
       curl -Lb /tmp/cookie "https://drive.google.com/uc?export=download&confirm=${CODE}&id=1EsObTazsUxmIBj-37L3I2hTdXvVItQD8" -o tensorflow-2.5.0-cp39-none-linux_aarch64.whl && \
-      pip3 install tensorflow-2.5.0-cp39-none-linux_aarch64.whl dnslib cachetools keras flask pyroute2 && \
+      pip3 install tensorflow-2.5.0-cp39-none-linux_aarch64.whl && \
       apt remove curl build-essential python3.9-dev; \
     else \
       pip3 install tensorflow; \
     fi\
   fi && \
   dpkg -i /root/bcc/*.deb && \
-  ln -s /usr/lib/python3/dist-packages/bcc /usr/local/lib/python3.9/site-packages/bcc && \
   pip install -r requirements.txt && \
   rm -rf /root/bcc && \
   apt clean && \

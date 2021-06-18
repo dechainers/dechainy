@@ -38,14 +38,15 @@ WORKDIR /app
 RUN \
   apt update -y && \
   apt install -y libncurses5 binutils python python3 libelf1 kmod  && \
-  pip install dnslib cachetools flask pyroute2 keras && \
+  pip install dnslib cachetools && \
+  pip install -r requirements.txt && \
   dpkg -i /root/bcc/*.deb && \
   ln -s /usr/lib/python3/dist-packages/bcc /usr/local/lib/python3.6/dist-packages/bcc && \
   rm -rf /root/bcc && \
   apt clean && \
   apt autoremove
 
-CMD exec python -W ignore -m dechainy
+CMD exec python3 -W ignore -m dechainy
 
 ##############
 # docker run --rm --gpus all --privileged --network host \

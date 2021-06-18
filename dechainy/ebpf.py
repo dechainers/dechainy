@@ -157,7 +157,7 @@ class SwapStateCompile:
         if self.__is_destroyed:
             exit(1)
         self.__index = (self.__index + 1) % 2
-        self.__chain_map[self.__programs_id] = ct.c_int(
+        self.__chain_map[self.__programs_id-1] = ct.c_int(
             self.__programs[self.__index].fd)
 
     def __getitem__(self, key: any) -> any:
@@ -345,7 +345,7 @@ def get_formatted_code(
         # Substitute the dp_log invocation (length 6 characters) with the right
         # logging function
         code = code[:start] \
-            + f'if ({log_level} >= LOG_LEVEL)' \
+            + f'if ({log_level} <= LOG_LEVEL)' \
             + '{LOG_STRUCT' \
             + code[start + 6:end] \
             + 'log_buffer.perf_submit(ctx, &msg_struct, sizeof(msg_struct));}' \
@@ -437,12 +437,9 @@ def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeat
             tmp = splitted[0].split('(')
             prefix_decl = tmp[0]
             map_type = tmp[1]
-            orig_decl = orig_decl.replace(map_type, '"extern"')
-            if "BPF_TABLE_" in prefix_decl:  # shared/public/pinned
-                orig_decl = orig_decl.replace(prefix_decl, "BPF_TABLE")
-            elif "BPF_QUEUESTACK_" in prefix_decl:  # shared/public/pinned
-                orig_decl = orig_decl.replace(prefix_decl, "BPF_QUEUESTACK")
-            else:
+            # if no shared/public/pinned or already extern then adjust declaration
+            if "BPF_TABLE_" not in prefix_decl and "BPF_QUEUESTACK_" not in prefix_decl and "extern" not in map_type:
+                orig_decl = orig_decl.replace(map_type, '"extern"')
                 index = len(prefix_decl)
                 orig_decl = orig_decl[:index] + "_SHARED" + orig_decl[index:]
 

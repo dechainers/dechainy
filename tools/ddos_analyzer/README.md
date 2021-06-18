@@ -50,7 +50,7 @@ The probe configuration must be as follows:
             "ingress": ...,
             "egress": ...,
             "cp_function": ...,
-            "files": {
+            "extra": {
                 "model": <put here the value>
             }
         }

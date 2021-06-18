@@ -16,7 +16,7 @@ from os.path import isfile
 from json import load
 from signal import SIGINT, SIGTERM, signal, pause
 
-from .configurations import AppConfig
+from .configurations import AppConfig, ServerConfig
 from . import Controller, create_server
 
 # The path to check for the startup file is <current>/startup.json
@@ -69,15 +69,16 @@ def main():
     """Function used when the module is called as main file. It provides, given the provided (or not)
     startup file, a running Controller and optionally a REST server
     """
+    config: AppConfig = AppConfig()
+
     if not isfile(__startup_file):
-        # no startup config found, launch default
-        __spawn_local(AppConfig())
+        config.server = ServerConfig()
+        __spawn_server(config=config)
     else:
-        # startup config found
         with open(__startup_file) as fp:
             config = AppConfig(load(fp))
         __spawn_server(
-            config=config) if config.server else __spawn_local(config)
+            config=config) if config.server else __spawn_local(config)        
 
 
 if __name__ == '__main__':

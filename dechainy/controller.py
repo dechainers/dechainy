@@ -21,6 +21,7 @@ from pyroute2.netlink.exceptions import NetlinkError
 from bcc import BPF
 from os.path import isfile, dirname
 import ctypes as ct
+import sys
 
 from .exceptions import ClusterWithoutCPException, CustomCPDisabledException, UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
@@ -211,6 +212,8 @@ class Controller(metaclass=Singleton):
                 exceptions.ProbeInClusterException)
         self.__remove_probe_programs(
             self.__probes[plugin_name][probe_name].programs)
+        if self.__probes[plugin_name][probe_name]._config.cp_function and self.__custom_cp:
+            del sys.modules[f'{plugin_name}_{probe_name}']
         del self.__probes[plugin_name][probe_name]
         self.__logger.info(
             f'Successfully deleted probe {probe_name} for plugin {plugin_name}')
@@ -251,6 +254,7 @@ class Controller(metaclass=Singleton):
                                        " must leave at least 1 accepted hook active")
         if conf.cp_function and self.__custom_cp:
             module = ModuleType(f'{plugin_name}_{probe_name}')
+            sys.modules[f'{plugin_name}_{probe_name}'] = module
             exec(conf.cp_function, module.__dict__)
             if hasattr(module, "pre_compilation"):
                 module.pre_compilation(conf)
@@ -353,6 +357,7 @@ class Controller(metaclass=Singleton):
         module = None
         # Loading the Control Plane function of the Cluster if any
         module = ModuleType(cluster_name)
+        sys.modules[cluster_name] = module
         exec(conf.cp_function, module.__dict__)
         if hasattr(module, "pre_compilation"):
             module.pre_compilation(conf)
@@ -377,6 +382,7 @@ class Controller(metaclass=Singleton):
             for probe_name in probe_map.keys():
                 self.__probes[plugin_name][probe_name]._config.is_in_cluster = False
                 self.delete_probe(plugin_name, probe_name)
+        del sys.modules[cluster_name]
         self.__logger.info(f'Successfully deleted Cluster {cluster_name}')
         return cluster_name
 
@@ -574,7 +580,7 @@ class Controller(metaclass=Singleton):
             self.__ip.tc("add-filter", "bpf", idx, ':1', fd=f.fd, name=f.name,
                          parent=parent, classid=1, direct_action=True)
         self.__programs[idx][f'{program_type}_{mode_map_name}'].append(
-            Program(interface, idx, mode, b, b.load_func('handler', mode).fd))
+            Program(interface, idx, mode, b, f.fd))
 
     def __compile(self, config: ProbeConfig, plugin_class: Plugin) -> ProbeCompilation:
         """Internal Function to compile a probe and inject respective eBPF programs
@@ -633,7 +639,7 @@ class Controller(metaclass=Singleton):
                 original_code, swap_code, features = precompile_parse(
                     config[program_type])
 
-            cflags = plugin_class.get_cflags() + config.cflags + \
+            cflags = plugin_class.get_cflags(config) + config.cflags + \
                 get_cflags(mode, program_type,
                            current_probes, config.log_level)
 
@@ -687,5 +693,5 @@ class Controller(metaclass=Singleton):
                 ret[program_type] = SwapStateCompile(
                     [p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
             # Append the main program to the list of programs
-            self.__programs[idx][map_of_interest].append(p)
+            self.__programs[idx][map_of_interest].append(ret[program_type])
         return ret

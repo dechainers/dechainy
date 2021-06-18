@@ -158,7 +158,7 @@ class Plugin(BaseEntity):
         return False
 
     @staticmethod
-    def get_cflags() -> List[str]:
+    def get_cflags(config: ProbeConfig) -> List[str]:
         """Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
 
         Returns:
@@ -267,6 +267,8 @@ class Mitigator(Plugin):
     def __init__(self, config: ProbeConfig, module: ModuleType, programs: ProbeCompilation):
         super().__init__(config, module, programs)
         self.__rules: List[MitigatorRule] = []
+        self.__max_ips: int = Mitigator._MAX_IPS if not config.extra \
+            or "max_ips" not in config.extra else config.extra["max_ips"]
 
     def get_at(self, rule_id: int) -> MitigatorRule:
         """Function to retrieve a rule at a specific position
@@ -350,7 +352,7 @@ class Mitigator(Plugin):
                 "Attempting to insert a rule which is already present")
         if rule_id > len(self.__rules):
             raise IndexError("The Rule ID provided is wrong")
-        if rule_id == Mitigator._MAX_IPS:
+        if rule_id == self.__max_ips:
             raise MemoryError("You reached the maximum amount of rules")
 
         key = LpmKey(rule.netmask, ipv4_to_network_int(rule.ip))
@@ -406,8 +408,9 @@ class Mitigator(Plugin):
         return str(ret)
 
     @staticmethod
-    def get_cflags() -> List[str]:
-        return [f'-DMAX_IPS={Mitigator._MAX_IPS}']
+    def get_cflags(config: ProbeConfig) -> List[str]:
+        return [f'-DMAX_IPS=\
+            {Mitigator._MAX_IPS if not config.extra or "max_ips" not in config.extra else config.extra["max_ips"]}']
 
     @staticmethod
     def accepted_hooks() -> List[str]:
@@ -420,14 +423,16 @@ class Firewall(Plugin):
     # Size of the eBPF maps, how many entries can they accept
     _RULE_IDS_MAX_ENTRY = 10000
     _MAX_RULES = 100
-    # Each entry hosts 64 rules
-    _RULE_IDS_WORDS_PER_ENTRY = ceil(_MAX_RULES / 64)
     _MAPS = ['IPV4_SRC', 'IPV4_DST', 'PORT_SRC',
              'PORT_DST', 'IP_PROTO', 'TCP_FLAGS']
     _ALL_MAPS = _MAPS + [f"{x}_WILDCARDS" for x in _MAPS]
 
     def __init__(self, config: ProbeConfig, module: ModuleType, programs: ProbeCompilation):
         super().__init__(config, module, programs)
+        self.__max_rules = Firewall._MAX_RULES if not config.extra \
+            or "max_rules" not in config.extra else config.extra["max_rules"]
+        # Each entry hosts 64 rules
+        self.__rule_ids_word_per_entry = ceil(self.__max_rules / 64)
         self.__rules: Dict[str, List[FirewallRule]] = {
             "ingress": [],
             "egress": []
@@ -490,14 +495,14 @@ class Firewall(Plugin):
                 cnt_zeros = 0
                 carry = 0
                 # Starting from right to left
-                for w in range(Firewall._RULE_IDS_WORDS_PER_ENTRY - 1, word, -1):
+                for w in range(self.__rule_ids_word_per_entry - 1, word, -1):
                     cnt_zeros += int(arr[w] == 0)
                     tmp = carry
                     carry = arr[w] >> 63
                     arr[w] = (arr[w] << 1) | tmp
                 cnt_zeros += int(arr[word] == 0)
                 # If all zeros, then remove the entire entry
-                if cnt_zeros == Firewall._RULE_IDS_WORDS_PER_ENTRY:
+                if cnt_zeros == self.__rule_ids_word_per_entry:
                     del self.programs[program_type][map_name][key]
                     continue
                 # Finishing the current word, which has also the offset into account
@@ -549,7 +554,7 @@ class Firewall(Plugin):
                 "Attempting to insert a rule which is already present")
         if rule_id > len(self.__rules[program_type]):
             raise IndexError("The Rule ID provided is wrong")
-        if rule_id == Firewall._MAX_RULES:
+        if rule_id == self.__max_rules:
             raise MemoryError("You reached the maximum amount of rules")
 
         word, offset = (rule_id // 64, 63 - rule_id % 64)
@@ -568,7 +573,7 @@ class Firewall(Plugin):
                     to_shift = (arr[word] & (pow(2, offset_ok) - 1)) >> 1
                     arr[word] = ok | to_shift
                     # Finishing all the other words
-                    for w in range(word + 1, Firewall._RULE_IDS_WORDS_PER_ENTRY):
+                    for w in range(word + 1, self.__rule_ids_word_per_entry):
                         tmp = carry
                         carry = arr[w] & 1
                         arr[w] = (arr[w] >> 1) | (tmp << 63)
@@ -583,7 +588,7 @@ class Firewall(Plugin):
             if value in self.programs[program_type][map_name]:
                 arr = self.programs[program_type][map_name][value].rule_words
             else:
-                arr = (ct.c_uint64 * Firewall._RULE_IDS_WORDS_PER_ENTRY)()
+                arr = (ct.c_uint64 * self.__rule_ids_word_per_entry)()
             arr[word] |= (1 << offset)
             self.programs[program_type][map_name][value] = arr
         self.programs[program_type]['ACTIONS'][ct.c_uint32(
@@ -678,9 +683,15 @@ class Firewall(Plugin):
         ]
 
     @staticmethod
-    def get_cflags() -> List[str]:
+    def get_cflags(config: ProbeConfig) -> List[str]:
+        rule_ids_max_entry = Firewall._RULE_IDS_MAX_ENTRY if config.extra is None \
+            or "rule_ids_max_entry" not in config.extra else config.extra["rule_ids_max_entry"]
+        max_rules = Firewall._MAX_RULES if config.extra is None \
+            or "max_rules" not in config.extra else config.extra["max_rules"]
+        # Each entry hosts 64 rules
+        rule_ids_word_per_entry = ceil(max_rules / 64)
         return [
             '-DFW_ACTION_DEFAULT=DROP',
-            f'-DRULE_IDS_MAX_ENTRY={Firewall._RULE_IDS_MAX_ENTRY}',
-            f'-DMAX_RULES={Firewall._MAX_RULES}',
-            f'-DRULE_IDS_WORDS_PER_ENTRY={Firewall._RULE_IDS_WORDS_PER_ENTRY}']
+            f'-DRULE_IDS_MAX_ENTRY={rule_ids_max_entry}',
+            f'-DMAX_RULES={max_rules}',
+            f'-DRULE_IDS_WORDS_PER_ENTRY={rule_ids_word_per_entry}']

@@ -23,10 +23,10 @@ from multiprocessing.pool import ThreadPool
 from multiprocessing import Process
 from base64 import b64decode
 from collections import OrderedDict
-from typing import Dict, List
+from typing import Dict
 from itertools import groupby
 
-from bcc.table import QueueStack, TableBase
+from bcc.table import TableBase
 
 from dechainy.utility import ipv4_to_string, port_to_host_int, protocol_to_string
 from dechainy.ebpf import is_batch_supp
@@ -97,7 +97,7 @@ def async_prediction(packets,
 
     global model_path, feature_list
 
-    from keras.models import load_model
+    from tensorflow.keras.models import load_model
     model = load_model(model_path)
 
     ids_list = []
@@ -155,22 +155,6 @@ def extract_sessions(table: TableBase, return_map=False):
         return flows
 
 
-def extract_packets(queue: QueueStack) -> List[any]:
-    """Function called asynchronously to retrieve all packets from the queue.
-    Unfortunately, queue does not support batch operation, so iterative functions are used.
-    Args:
-        queue (QueueStack): The queue of interest
-    Returns:
-        List[any]: The list of packets
-    """
-    packets = []
-    try:
-        while True:
-            packets.append(queue.pop())
-    except KeyError:
-        return packets
-
-
 def reaction_function_rest(probe: Plugin) -> Dict[str, any]:
     """Function called via REST interaction
     Args:
@@ -192,7 +176,7 @@ def reaction_function_rest(probe: Plugin) -> Dict[str, any]:
         extract_sessions, (probe["ingress"]["SESSIONS_TRACKED_DDOS"],))
 
     checkpoint_1 = time.time()
-    packets = extract_packets(probe["ingress"]["PACKET_BUFFER_DDOS"])
+    packets = list(probe["ingress"]["PACKET_BUFFER_DDOS"].values())
     total_pkts_passed_from_sessions = task.get()
     checkpoint_2 = time.time()
 
@@ -212,11 +196,11 @@ def reaction_function(probe: Plugin):
 def pre_compilation(config: ProbeConfig):
     global feature_list, MAX_FLOW_LEN, model_path
 
-    if 'model' not in config.files:
+    if 'model' not in config.extra:
         raise Exception("No Model has been specified")
 
     # Storing the model into a temporary file
-    model_path = config.files['model']
+    model_path = config.extra['model']
     if not os.path.isfile(model_path):
         content = model_path
         model_path = "/tmp/model"
