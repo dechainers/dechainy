@@ -13,7 +13,6 @@
 # limitations under the License.
 from atexit import register
 from logging import getLogger, INFO, StreamHandler, Formatter
-from threading import Thread
 from types import ModuleType
 from typing import Dict, List, Union
 from pyroute2 import IPRoute
@@ -22,6 +21,7 @@ from bcc import BPF
 from os.path import isfile, dirname
 import ctypes as ct
 import sys
+import setproctitle
 
 from .exceptions import ClusterWithoutCPException, CustomCPDisabledException, UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
@@ -29,7 +29,7 @@ from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
     Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
 from .configurations import ClusterConfig, PluginConfig, ProbeConfig
 from .plugins import Cluster, Plugin
-from .utility import Singleton
+from .utility import CPProcess, Singleton
 from . import exceptions
 from . import plugins
 
@@ -96,7 +96,12 @@ class Controller(metaclass=Singleton):
         self.__startup: BPF = BPF(text=get_startup_code())
         self.__startup['control_plane'].open_perf_buffer(self.__parse_packet)
         self.__startup['log_buffer'].open_perf_buffer(self.__log_function)
-        Thread(target=self.__start_poll, args=(), daemon=True).start()
+
+        # Starting daemon process to poll perf buffers for messages
+        CPProcess(target_fun=self.__startup.perf_buffer_poll,
+                  ent=None, time_window=0,
+                  name="DeChainy-PerfBufferPoller",
+                  daemon=True).start()
         register(self.__del__)
 
         # Verifying received plugins_to_load, else load all plugins
@@ -129,6 +134,7 @@ class Controller(metaclass=Singleton):
                     f'Loaded BPF code from file for Plugin {plugin_name}')
             self.__declarations[plugin_name] = PluginConfig(
                 class_def, codes["ingress"], codes["egress"])
+        setproctitle.setproctitle("DeChainy-Controller")
 
     def __del__(self):
         if self.__is_destroyed:
@@ -143,6 +149,10 @@ class Controller(metaclass=Singleton):
             if self.__programs[idx].ingress_tc or self.__programs[idx].egress_tc:
                 self.__ip.tc("del", "clsact", idx)
         self.__ip.link("del", ifname="DeChainy")
+        # Delete all Plugins and Clusters
+        for v in self.__probes.values():
+            for vv in v.values():
+                vv.__del__()
 
     def __log_and_raise(self, msg: str, exception: Exception):
         """Method to log a message and raise the specified exception
@@ -398,12 +408,11 @@ class Controller(metaclass=Singleton):
         self.__check_cluster_exists(cluster_name)
         return self.__clusters[cluster_name].__repr__()
 
-    def execute_cp_function_cluster(self, cluster_name: str, func_name: str) -> any:
+    def execute_cp_function_cluster(self, cluster_name: str) -> any:
         """Function to execute a Control Plane function of a cluster
 
         Args:
             cluster_name (str): The name of the cluster
-            func_name (str): The name of the function to call
             argv (tuple): The list of arguments
 
         Returns:
@@ -416,11 +425,6 @@ class Controller(metaclass=Singleton):
     ######################################################################
     # ------------- Function to manage bpf code --------------------------
     ######################################################################
-
-    def __start_poll(self):
-        """Function to poll perf buffers to wait for messages, both log and Packets"""
-        while True:
-            self.__startup.perf_buffer_poll()
 
     def __log_function(
             self,

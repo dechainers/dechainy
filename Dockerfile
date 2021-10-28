@@ -55,7 +55,6 @@ RUN \
   rm -f /usr/bin/python3 && \
   ln -s /usr/bin/python3.9 /usr/bin/python3 && \
   if [ "$BUILDTYPE" = "test" ] ; then       \
-    apt install -y python3-pytest &&        \
     pip3 install pytest flake8;              \
   else                                      \
     rm -rf /app/tests;                      \

@@ -10,7 +10,7 @@ Although, for those who does not want to use the image and run the module locall
 * BCC (read following lines)
 
 Despite existing a *python3-bpfcc* packet from the Ubuntu package manager *apt*, it is not the latest release of such tool. Thus, many of the advanced
-operations with eBPF maps are not possible, and the framework would fail starting due to an import error. I strongly suggest to download the latest
+operations with eBPF maps are not possible, and the framework would fail starting due to an import error. I strongly suggest downloading the latest
 code from their [GitHub page](https://github.com/iovisor/bcc) and compile it as follows.
 
 ## Install

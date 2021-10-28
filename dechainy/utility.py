@@ -13,10 +13,14 @@
 # limitations under the License.
 import ctypes as ct
 import re
+import os
+import signal
+import time
+import setproctitle
 
 from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
-from threading import Thread, Event
+from multiprocessing import Process
 from typing import Callable
 
 
@@ -41,37 +45,32 @@ class Singleton(type):
         return cls._instance
 
 
-class CPThread(Thread):
-    """Utility class to create a daemon thread (stopped when destroying its proprietary)
+class CPProcess(Process):
+    """Utility class to create a Process (stopped when destroying its proprietary)
     to execute a function locally every time_window.
 
     Args:
-        target (Callable): The function to execute
-        args (tuple): The arguments provided
-        timeout (int): The periodic restart value
-
-    Attributes:
-        func (Callable): The function to be executed
-        args (tuple): The arguments provided to the function
-        time_window (int): The timeout used for the thread to re-start
+        target_fun (Callable): The function to execute periodically
+        ent (BaseEntity): The entity which invoked the function
+        time_window (int): The periodic restart value
+        name (str): The name of the created process
+        daemon (bool): The daemon mode. Default False.
     """
 
-    def __init__(self, target: Callable, args: tuple, time_window: float):
-        super().__init__(target=target, args=args)
-        self.__func: Callable = target
-        self.__args: tuple = args
-        self.__timeout: float = time_window
-        self.__stop_event: Event = Event()
-        self.daemon: bool = True
+    def __init__(self, target_fun: Callable, ent, time_window: float, name: str, daemon: bool = False):
+        Process.__init__(self, target=self.cp_run, args=(
+            target_fun, ent, time_window, name,), daemon=daemon)
 
     def stop(self):
-        """Function called by the proprietary to stop the Thread"""
-        self.__stop_event.set()
+        """Function called by the proprietary to stop the Process"""
+        os.kill(self.pid, signal.SIGINT)
 
-    def run(self):
+    def cp_run(self, target_fun, ent, time_window, name):
         """Function to execute the provided function, if no stop signal registered within the time_window provided."""
-        while not self.__stop_event.wait(self.__timeout):
-            self.__func(*self.__args)
+        setproctitle.setproctitle(name)
+        while True:
+            time.sleep(time_window)
+            target_fun(ent) if ent else target_fun()
 
 
 def remove_c_comments(text: str) -> str:

@@ -6,7 +6,7 @@ Here follows a list of the supported versions of the framework
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
+| 1.x   | :white_check_mark: |
 
 ## Reporting a Vulnerability
 
