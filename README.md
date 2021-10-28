@@ -11,16 +11,14 @@ An open source framework to easily build and deploy eBPF/XDP network monitoring 
 
 ## Quick links
 
-Check out the official documetation at the following [link](https://dechainy.readthedocs.io).
-
-The guides are also available per-se here in the repo. Here follows a list of useful guides:
+Here follows a list of useful guides:
 
 * [Introduction](docs/README.md)
 * [Installation guide](docs/installation.md)
 * [User Manual](docs/reference_guide.md)
 * [Developer Manual](docs/developers.md)
-* [API Doc](docs/api)
 * [Tutorial](docs/tutorial.md)
+* [API Doc](docs/api)
 * [FAQ](docs/faq.md)
 
 ## License
@@ -29,6 +27,6 @@ DeChainy is licensed under the Apache License, Version 2.0 (ALv2).
 
 ## Acknowledgements
 
-A special thanks goes to [Polycube](https://github.com/polycube-network/polycube) community, in particular to my dear friends and collaborator from Politecnico di Torino, for the knowledge shared during these years.
+A special thank goes to [Polycube](https://github.com/polycube-network/polycube) community, in particular to my dear friends and collaborator from Politecnico di Torino, for the knowledge shared during these years.
 
 Last but not least, to all the [BCC](https://github.com/iovisor/bcc) community, since their framework is the main baseline I used to develop such project.

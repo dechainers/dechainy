@@ -8,6 +8,7 @@ Some useful links:
 
 - [Installation Guide](installation.md)
 - [Reference Guide](reference_guide.md)
-- [Configuration Examples](examples)
+- [Developers Guide](developers.md)
 - [Tutorials](tutorial.md)
+- [API Guide](api/)
 - [F.A.Q.](faq.md)

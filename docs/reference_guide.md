@@ -44,14 +44,18 @@ According to the [API documentation](api/configurations.md):
 
 Basically, the configuration can contain:
 
-- the list of plugins to enable (e.g. ["adaptmon”, "mitigator"]);
-- the list of clusters to create
-- the list of probes to create (instance of Plugins)
-- the configuration for the Server (e.g., address and port)
-- the possibility to accept dynamic user-define control plane routines. When disabled, clusters are not available, since they would not make sense
-- the log level of the entire framework (check [DPLogLevel](api/configurations.md))
+- List of plugins to enable (e.g. ["adaptmon”, "mitigator"]);
+- List of clusters to create
+- List of probes to create (instance of Plugins)
+- Configuration for the Server (e.g., address and port)
+- Possibility to accept dynamic user-define control plane routines. When disabled, clusters are not available, since they would not make sense
+- Log level of the entire framework (check [DPLogLevel](api/configurations.md))
 
 This configuration is optional. If not provided, the framework will automatically configure to work with all the Plugins active, and a server will be started at **localhost:8080**. From that moment on, the creation of probes and clusters need to be managed via REST API.
+
+Finally, every Plugin or Cluster may define additional parameters that are accepted in their configurations. In order to have a complete list, please refer to their documentation.
+
+For examples of basic configurations, you may want to check the [tutorial](tutorial.md).
 
 ## 3. Plugins
 
@@ -92,7 +96,7 @@ Other fields like **files** are used when the control plane routine needs to acc
 
 The **redirect** option is used when the probe needs to forward traffic to another specific interface, after successfully analysing it.
 
-An example of a probe control plane function can be retrieved [here](examples/src/pkt_counter/cp.py).
+An example of a probe control plane function can be retrieved [here](../tools/packet_counter/cp.py).
 
 ### 3.1 Programmable
 
@@ -108,9 +112,9 @@ A metric is characterized by:
 
 The additional features are inserted at the end of each map declaration, specifying **\_\_attributes\_\_\(\(\)\)**, which can contain inside the brackets:
 
-- EMPTY: when retrieving this metric, the underlying eBPF map needs to be emptied, zeroing its content. This allows a time-window network monitoring, instead of an incremental one.
-- EXPORT: the eBPF map representing the metric needs to be exported outside
-- SWAP: the eBPF metric needs to be atomically retrieved. This is the most comples concept within these features: basically, to keep coherent data when the control plane retrieves data from the eBPF program while the Data plane function keeps filling the map, we propose this advanced functionality, which allow users to consistently and safely retrieve all the metrics defined. Instead of a swappable dual-map approach, this feature is implemented as a swappable dual-programs approach, which results to have less latency swap interval, thus it does not affect networking performance. However, users must be aware that when activating this feature, the metric cannot represent the full state of the monitoring, as the two maps may contain different snapshot of the traffic, and aggregates between the two maps are not supported. Thus, if the user wants to perform an over-time network monitoring, this feature is not probably the best choice. On the other hand, if some metrics need to be incremental and others do not, this functionality perfectly fits your needs, allowing you to keep incremental eBPF maps between the original and the cloned program, while distinguishing the swappable maps between the two programs.
+- **EMPTY**: when retrieving this metric, the underlying eBPF map needs to be emptied, zeroing its content. This allows a time-window network monitoring, instead of an incremental one.
+- **EXPORT**: the eBPF map representing the metric needs to be exported outside
+- **SWAP**: the eBPF metric needs to be atomically retrieved. This is the most comples concept within these features: basically, to keep coherent data when the control plane retrieves data from the eBPF program while the Data plane function keeps filling the map, we propose this advanced functionality, which allow users to consistently and safely retrieve all the metrics defined. Instead of a swappable dual-map approach, this feature is implemented as a swappable dual-programs approach, which results to have less latency swap interval, thus it does not affect networking performance. However, users must be aware that when activating this feature, the metric cannot represent the full state of the monitoring, as the two maps may contain different snapshot of the traffic, and aggregates between the two maps are not supported. Thus, if the user wants to perform an over-time network monitoring, this feature is not probably the best choice. On the other hand, if some metrics need to be incremental and others do not, this functionality perfectly fits your needs, allowing you to keep incremental eBPF maps between the original and the cloned program, while distinguishing the swappable maps between the two programs.
 
 #### 3.1.1 Adaptmon
 
@@ -126,32 +130,69 @@ These plugins are not personalizable, but they are defined with a specific purpo
 
 #### 3.2.1 Firewall
 
-This is an entire Firewall implemented in eBPF, like the one presented by Facebook [here](https://cilium.io/blog/2018/11/20/fb-bpf-firewall). It accepts rules to be injected/removed, which have to be compliant with this format:
+This is an entire Firewall implemented in eBPF, like the one presented by Facebook [here](https://cilium.io/blog/2018/11/20/fb-bpf-firewall). Configuration of a Firewall is as follows:
 
-`FirewallRule(obj: dict = None)`
-:   Class to represent a firewall iptable-like rule
-    
-    Attributes:
-        src (str): The source address to match. Default None.
-        dst (str): The destination address to match. Default None.
-        sport (int): The source port to match. Default None.
-        dport (int): The destination port to match. Default None.
-        l4proto (str): The Layer 4 protocol to match. Default None.
-        tcpflags (str): A string containing the names of the TCP Flags to match. Default None.
+```json
+{
+  "probes": [
+    {
+      "plugin": "firewall",
+      "name": "simple_firewall",
+      "mode": "XDP",
+      "interface": "wlp0s20f3",
+      "extra": {
+        "max_rules": 30000      <------------------ N° of maximum Rules. Default 1024. 
+      }
+    }
+  ],
+  ...
+}
+```
 
+It accepts rules to be injected/removed, which have to be compliant with this format:
+
+```json
+{
+  "src": "The source address to match. Default None.",
+  "dst": "The destination address to match. Default None.",
+  "sport": "The source port to match. Default None.",
+  "dport": "The destination port to match. Default None.",
+  "l4proto": "The Layer 4 protocol to match. Default None.",
+  "tcpflags": "A string containing the names of the TCP Flags to match. Default None."
+}
+```
 
 At least one field needs to be provided in ordert o accept the rule. If successfully accepted, the rule is assigned a unique identifier, which can be used whether to substitute or remove it from the list of rules. Source and Destination IPs can be provided either with a netmask (e.g, 10.0.0.1/24) or single IP addresses. The default action when injecting a rule is to forbid the traffic, otherwise it automatically passes through the interface.
 
 #### 3.2.2 Mitigator
 
-This is a simpler version of the Firewall, which accepts easier rules based only on IP addresses and netmasks, ignoring additional information like protocols or ports. The simple rule is as follows:
+This is a simpler version of the Firewall, which accepts easier rules based only on IP addresses and netmasks, ignoring additional information like protocols or ports. An example of configuration to create a Mitigator instance:
 
-`MitigatorRule(obj: dict = None)`
-:   Class to represent a mitigator rule
-    
-    Attributes:
-        ip (str): The Ip to block
-        netmask (str): The length of the netmask. Default 32.
+```json
+{
+  "probes": [
+    {
+      "plugin": "mitigator",
+      "name": "simple_mitigator",
+      "mode": "XDP",
+      "interface": "wlp0s20f3",
+      "extra": {
+        "max_rules": 30000      <------------------ N° of maximum blocked IPs. Default 1000.
+      }
+    }
+  ],
+  ...
+}
+```
+
+Rules follow this format:
+
+```json
+{
+  "ip": "The Ip to block",
+  "netmask": "The length of the netmask. Default 32."
+}
+```
 
 Following the same principle of the Firewall, upon the creation of a rule, a unique identifier is created, to interact with the rule.
 
@@ -161,19 +202,24 @@ Clusters are groups of Plugin instances (probes) that needs to interact with eac
 
 A typical cluster configuration is as follows:
 
-`ClusterConfig(obj: dict = None)`
-:   Class to represent a Cluster configuration
-    
-    Attributes:
-        probes (List[ProbeConfig]): List of probes componing the cluster. Default [].
-        time_window (int): periodic time to run the control plane function, if any. Default 10.
-        cp_function (str): The cluster Controlplane function. Default None.
-        name (str): The name of the cluster. Default None.
-
+```json
+{
+  "clusters": [
+    {
+      "probes": "List of probes componing the cluster. Default [].",
+      "time_window": "Periodic time to run the control plane function, if any. Default 10.",
+      "cp_function": "The cluster Controlplane function. Default None.",
+      "name": "The name of the cluster. Default None."
+    },
+    ...
+  ],
+  ...
+}
+```
 
 As previously anticipated, the **cp_function** needs to be provided, otherwise the configuration is rejected. In addition, in **probes** are listed all the probes that needs to be created within the cluster. As a result, in the control plane function users can directly access such probes, without passing through standard Controller calls.
 
-An example of a cluster control plane code can be found [here](examples/src/cluster_cp.py), and [here](examples/cluster.json) the apposite system configuration.
+An example of a cluster control plane code can be found in the [tutorial](tutorial.md) guide.
 
 When working in the server mode, the only endpoint exposed by the clusters is the **exec** endpoints, which will call the user-defined routine accordingly.
 
@@ -183,17 +229,14 @@ Either probes or cluster control plane functions are characterized by four main 
 
 - **pre_compilation**: list of operations to be executed before compiling the probes (e.g., modifying the program cflags to be used, or prepare additional files or data structures)
 - **post_compilation**: list of operations to be executed after compiling the probe (e.g., initializing eBPF maps with certain values)
-- **reaction_function**: the main routine to be periodically executed according to the specified **time_window** in the configuration, if any (e.g., check that the incoming packets is less than a given value)
-- **reaction_function_rest**: the control plane function to be executed when calling the **exec** endpoint via REST API.
+- **reaction_function**: the main routine periodically executed on a different process every **time_window** seconds specified in the configuration
+- **reaction_function_rest**: the control plane function to be executed when calling the **exec** endpoint via REST API, in server mode.
 
 In addition, users can define other internal auxiliary functions within this code that will be executed. Although, this functionality is not safe, meaning that the injected code is not executed within a safe and controlled environment (sandbox with lower privileges). Thus, when activating this feature, be aware of the possible risks that the system can issue.
 
-## Hands on
+## 6. Hands on
 
 To get started with the framework, users can either look at:
 
-- configuration examples [here](examples) (json files)
-- source code examples [here](examples/src) (both ebpf and python control planes)
-- proposed and working tools [here](../tools)
-
-Follow the proposed [tutorials](tutorial.md) to get familiar with the framework!
+- tutorials including startup configurations [here](tutorial.md)
+- proposed and working tools with source code [here](../tools)

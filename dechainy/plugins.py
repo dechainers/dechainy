@@ -22,7 +22,7 @@ from bcc.table import QueueStack, ArrayBase, TableBase
 from .exceptions import HookDisabledException, MetricUnspecifiedException
 from .configurations import ClusterConfig, FirewallRule, MetricFeatures, MitigatorRule, ProbeConfig
 from .ebpf import BPF, LpmKey, Program, SwapStateCompile, ProbeCompilation, ClusterCompilation, is_batch_supp
-from .utility import Dict, CPThread, protocol_to_int, ipv4_to_network_int, port_to_network_int, ctype_to_normal
+from .utility import Dict, CPProcess, protocol_to_int, ipv4_to_network_int, port_to_network_int, ctype_to_normal
 
 
 class BaseEntity:
@@ -35,7 +35,7 @@ class BaseEntity:
 
     Attributes:
         is_destroyed (bool): True while the instance is not destroyed
-        thread (CPThread): The locally created thread if needed
+        thread (CPProcess): The locally created thread if needed
         module (ModuleType): The module containing additional functions
         config (Union[ProbeConfig, ClusterConfig]): The configuration of the object
         programs (Union[ProbeCompilation, ClusterCompilation]): The compiled eBPF programs for the Probe or Cluster
@@ -44,25 +44,27 @@ class BaseEntity:
     def __init__(self, config: Union[ProbeConfig, ClusterConfig], module: ModuleType,
                  programs: Union[ProbeCompilation, ClusterCompilation]):
         self._is_destroyed: bool = False
-        self._thread: CPThread = None
+        self._proc: CPProcess = None
         self._module: ModuleType = module
         self._config: Union[ProbeConfig, ClusterConfig] = config
         self.programs: Union[ProbeCompilation, ClusterCompilation] = programs
         # If the module has a post_compilation function, call it
         if hasattr(module, "post_compilation"):
             module.post_compilation(self)
-        # If required, run local thread to execute non-REST function
+        # If required, run local proc to execute non-REST function
         if hasattr(module, "reaction_function"):
-            self._thread = CPThread(
-                target=module.reaction_function, args=(self,), time_window=self._config.time_window)
-            self._thread.start()
+            self._proc = CPProcess(
+                target_fun=module.reaction_function,
+                ent=self, time_window=self._config.time_window,
+                name=f"DeChainy-ControlPlane-{config.name}")
+            self._proc.start()
 
     def __del__(self):
         if self._is_destroyed:
             return
         self._is_destroyed = True
-        if self._thread:
-            self._thread.stop()
+        if self._proc:
+            self._proc.stop()
 
     def __repr__(self):
         return self._config
@@ -262,13 +264,13 @@ class Adaptmon(Plugin):
 class Mitigator(Plugin):
     """Mitigator class, an eBPF implementation of an IP/Netmask mitigator."""
 
-    _MAX_IPS = 1000
+    _MAX_RULES = 1000
 
     def __init__(self, config: ProbeConfig, module: ModuleType, programs: ProbeCompilation):
         super().__init__(config, module, programs)
         self.__rules: List[MitigatorRule] = []
-        self.__max_ips: int = Mitigator._MAX_IPS if not config.extra \
-            or "max_ips" not in config.extra else config.extra["max_ips"]
+        self.__max_rules: int = Mitigator._MAX_RULES if not config.extra \
+            or "max_rules" not in config.extra else config.extra["max_rules"]
 
     def get_at(self, rule_id: int) -> MitigatorRule:
         """Function to retrieve a rule at a specific position
@@ -352,7 +354,7 @@ class Mitigator(Plugin):
                 "Attempting to insert a rule which is already present")
         if rule_id > len(self.__rules):
             raise IndexError("The Rule ID provided is wrong")
-        if rule_id == self.__max_ips:
+        if rule_id == self.__max_rules:
             raise MemoryError("You reached the maximum amount of rules")
 
         key = LpmKey(rule.netmask, ipv4_to_network_int(rule.ip))
@@ -409,8 +411,8 @@ class Mitigator(Plugin):
 
     @staticmethod
     def get_cflags(config: ProbeConfig) -> List[str]:
-        return [f'-DMAX_IPS=\
-            {Mitigator._MAX_IPS if not config.extra or "max_ips" not in config.extra else config.extra["max_ips"]}']
+        return [f'-DMAX_RULES=\
+            {Mitigator._MAX_RULES if not config.extra or "max_rules" not in config.extra else config.extra["max_rules"]}']
 
     @staticmethod
     def accepted_hooks() -> List[str]:
@@ -422,7 +424,7 @@ class Firewall(Plugin):
 
     # Size of the eBPF maps, how many entries can they accept
     _RULE_IDS_MAX_ENTRY = 10000
-    _MAX_RULES = 100
+    _MAX_RULES = 1000
     _MAPS = ['IPV4_SRC', 'IPV4_DST', 'PORT_SRC',
              'PORT_DST', 'IP_PROTO', 'TCP_FLAGS']
     _ALL_MAPS = _MAPS + [f"{x}_WILDCARDS" for x in _MAPS]

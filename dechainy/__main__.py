@@ -78,7 +78,7 @@ def main():
         with open(__startup_file) as fp:
             config = AppConfig(load(fp))
         __spawn_server(
-            config=config) if config.server else __spawn_local(config)        
+            config=config) if config.server else __spawn_local(config)
 
 
 if __name__ == '__main__':

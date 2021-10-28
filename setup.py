@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import setuptools
 
 with open("README.md", "r") as fh:
@@ -27,7 +26,7 @@ setuptools.setup(
     description="An open source framework to easily build and deploy eBPF/XDP network monitoring probes and clusters",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="",  # https://github.com/pypa/sampleproject
+    url="https://github.com/s41m0n/dechainy",
     packages=setuptools.find_packages(exclude=("tests",)),
     classifiers=[
         "Programming Language :: Python :: 3",
