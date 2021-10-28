@@ -80,7 +80,8 @@ Functions
     
 `remove_c_comments(text: str) ‑> str`
 :   Function to remove C-like comments, working also in trickiest cases
-    Useful link: https://stackoverflow.com/questions/36454069/how-to-remove-c-style-comments-from-code
+    [New] Useful link: https://gist.github.com/ChunMinChang/88bfa5842396c1fbbc5b
+    [Old] Useful link: https://stackoverflow.com/questions/36454069/how-to-remove-c-style-comments-from-code
     
     Args:
         text (str): the original text with comments
@@ -91,51 +92,29 @@ Functions
 Classes
 -------
 
-`CPThread(target: Callable, args: tuple, time_window: float)`
-:   Utility class to create a daemon thread (stopped when destroying its proprietary)
+`CPProcess(target_fun: Callable, ent, time_window: float, name: str, daemon: bool = False)`
+:   Utility class to create a Process (stopped when destroying its proprietary)
     to execute a function locally every time_window.
     
     Args:
-        target (Callable): The function to execute
-        args (tuple): The arguments provided
-        timeout (int): The periodic restart value
-    
-    Attributes:
-        func (Callable): The function to be executed
-        args (tuple): The arguments provided to the function
-        time_window (int): The timeout used for the thread to re-start
-    
-    This constructor should always be called with keyword arguments. Arguments are:
-    
-    *group* should be None; reserved for future extension when a ThreadGroup
-    class is implemented.
-    
-    *target* is the callable object to be invoked by the run()
-    method. Defaults to None, meaning nothing is called.
-    
-    *name* is the thread name. By default, a unique name is constructed of
-    the form "Thread-N" where N is a small decimal number.
-    
-    *args* is the argument tuple for the target invocation. Defaults to ().
-    
-    *kwargs* is a dictionary of keyword arguments for the target
-    invocation. Defaults to {}.
-    
-    If a subclass overrides the constructor, it must make sure to invoke
-    the base class constructor (Thread.__init__()) before doing anything
-    else to the thread.
+        target_fun (Callable): The function to execute periodically
+        ent (BaseEntity): The entity which invoked the function
+        time_window (int): The periodic restart value
+        name (str): The name of the created process
+        daemon (bool): The daemon mode. Default False.
 
     ### Ancestors (in MRO)
 
-    * threading.Thread
+    * multiprocessing.context.Process
+    * multiprocessing.process.BaseProcess
 
     ### Methods
 
-    `run(self)`
+    `cp_run(self, target_fun, ent, time_window, name)`
     :   Function to execute the provided function, if no stop signal registered within the time_window provided.
 
     `stop(self)`
-    :   Function called by the proprietary to stop the Thread
+    :   Function called by the proprietary to stop the Process
 
 `Dict(*args, **kwargs)`
 :   Utility class to define a Class  attributes accessible also with square brackets
