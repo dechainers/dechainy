@@ -27,6 +27,7 @@ Classes
         probes (List[ProbeConfig]): List of probes componing the cluster. Default [].
         time_window (float): periodic time to run the control plane function, if any. Default 10.
         cp_function (str): The cluster Controlplane function. Default None.
+        extra (Dict[str, any]): Dictionary containing additional configurations. Default None.
         name (str): The name of the cluster. Default None.
 
     ### Ancestors (in MRO)
@@ -119,7 +120,7 @@ Classes
         egress (str): Code for the egress hook. Default None.
         cp_function (str): The Control plane routine to be periodically executed if needed. Default "".
         cflags (List[str]): List of Cflags to be used while compiling programs. Default [].
-        files (Dict[str, str]): Dictionary containing additional files for the probe. Default {}.
+        extra (Dict[str, any]): Dictionary containing additional configurations. Default None.
         debug (bool): True if the probe must be inserted in debug mode. Default False.
         redirect(str): The name of the interface you want packets to be redirect as default action, else None
         plugin_name (str): The name of the plugin. Default None. (Set by Controller)

@@ -43,7 +43,7 @@ Classes
     
     Attributes:
         is_destroyed (bool): True while the instance is not destroyed
-        thread (CPThread): The locally created thread if needed
+        thread (CPProcess): The locally created thread if needed
         module (ModuleType): The module containing additional functions
         config (Union[ProbeConfig, ClusterConfig]): The configuration of the object
         programs (Union[ProbeCompilation, ClusterCompilation]): The compiled eBPF programs for the Probe or Cluster
@@ -317,7 +317,7 @@ Classes
         Returns:
             List[str]: The list of accepted hooks
 
-    `get_cflags() ‑> List[str]`
+    `get_cflags(config: dechainy.configurations.ProbeConfig) ‑> List[str]`
     :   Method to define per-plugin cflags (if any) to be used while compiling eBPF code.
         
         Returns:

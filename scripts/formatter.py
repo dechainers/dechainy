@@ -31,8 +31,9 @@ def main():
     try:
         import pyperclip
         pyperclip.copy(content)
-    except ImportError:
-        pass
+        print("Content successfully copied to clipboard!")
+    except:
+        print(content)
 
 
 def parseArguments():

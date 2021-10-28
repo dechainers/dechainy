@@ -71,12 +71,11 @@ Classes
         Returns:
             str: The name of the probe deleted
 
-    `execute_cp_function_cluster(self, cluster_name: str, func_name: str) ‑> <built-in function any>`
+    `execute_cp_function_cluster(self, cluster_name: str) ‑> <built-in function any>`
     :   Function to execute a Control Plane function of a cluster
         
         Args:
             cluster_name (str): The name of the cluster
-            func_name (str): The name of the function to call
             argv (tuple): The list of arguments
         
         Returns:
