@@ -163,8 +163,14 @@ int pkt_to_controller(struct CTXTYPE *ctx, struct pkt_metadata *md) {
 
 // Helper to compute Unix Epoch time
 static __always_inline
-uint64_t get_time_epoch() {
-  return EPOCH_BASE + bpf_ktime_get_ns();
+uint64_t get_time_epoch(struct CTXTYPE *ctx) {
+  return EPOCH_BASE +
+#ifdef XDP
+        bpf_ktime_get_ns()
+#else
+        ctx->tstamp
+#endif
+  ;
 }
 
 // Helper to get the n° of the 1st bit set to 1
