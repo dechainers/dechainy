@@ -23,6 +23,7 @@ import ctypes as ct
 import sys
 import setproctitle
 
+from threading import Thread
 from .exceptions import ClusterWithoutCPException, CustomCPDisabledException, UnknownInterfaceException, NoCodeProbeException
 from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
     get_pivoting_code, get_startup_code, precompile_parse, \
@@ -96,6 +97,7 @@ class Controller(metaclass=Singleton):
         self.__startup: BPF = BPF(text=get_startup_code())
         self.__startup['control_plane'].open_perf_buffer(self.__parse_packet)
         self.__startup['log_buffer'].open_perf_buffer(self.__log_function)
+        Thread(target=self.__start_poll, args=(), daemon=True).start()
 
         # Starting daemon process to poll perf buffers for messages
         CPProcess(target_fun=self.__startup.perf_buffer_poll,
@@ -425,6 +427,11 @@ class Controller(metaclass=Singleton):
     ######################################################################
     # ------------- Function to manage bpf code --------------------------
     ######################################################################
+
+    def __start_poll(self):
+        """Function to poll perf buffers to wait for messages, both log and Packets"""
+        while True:
+            self.__startup.perf_buffer_poll()
 
     def __log_function(
             self,
