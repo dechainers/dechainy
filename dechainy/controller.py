@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from atexit import register
-from logging import getLogger, INFO, StreamHandler, Formatter
+from logging import INFO
 from types import ModuleType
-from typing import Dict, List, Union
+from typing import Dict, List, Union, OrderedDict
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
 from bcc import BPF
 from os.path import isfile, dirname
 import ctypes as ct
 import sys
+import itertools
 import setproctitle
 
 from threading import Thread
@@ -30,7 +31,7 @@ from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
     Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
 from .configurations import ClusterConfig, PluginConfig, ProbeConfig
 from .plugins import Cluster, Plugin
-from .utility import CPProcess, Singleton
+from .utility import Singleton, get_logger, remove_c_comments
 from . import exceptions
 from . import plugins
 
@@ -49,9 +50,9 @@ class Controller(metaclass=Singleton):
                                             its class declaration and eBPF codes (if not customizable)
         programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index,
                                             the object holding all eBPF programs, for each type (TC, XDP, ingress/egress)
-        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin,
+        probes (OrderedDict[str, OrderedDict[str, Plugin]]): A dictionary containing, for each plugin,
                                             an inner dictionary holding the Plugin instance, given its name
-        clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
+        clusters (OrderedDict[str, Cluster]): A dictionary of Clusters, individualized by their names
         custom_cp (bool): True if enabled the possibility to accept user-define Control plane code,
                                             False otherwise. Default True.
         is_destroyed (bool): Variable to keep track of the instance lifecycle
@@ -60,21 +61,14 @@ class Controller(metaclass=Singleton):
     """
 
     def __init__(self, log_level: int = INFO, plugins_to_load: List[str] = None, custom_cp: bool = True):
-        # Initializing logger
-        self.__logger = getLogger(self.__class__.__name__)
-        self.__logger.setLevel(log_level)
-        ch = StreamHandler()
-        ch.setLevel(log_level)
-        ch.setFormatter(
-            Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        self.__logger.addHandler(ch)
+        self.__logger = get_logger(self.__class__.__name__, log_level)
 
         # Initializing local variables
         # TODO: add lock to instances map, clusters and programs
         self.__declarations: Dict[str, PluginConfig] = {}
         self.__programs: Dict[int, InterfaceHolder] = {}
-        self.__probes: Dict[str, Dict[str, Plugin]] = {}
-        self.__clusters: Dict[str, Cluster] = {}
+        self.__probes: OrderedDict[str, OrderedDict[str, Plugin]] = {}
+        self.__clusters: OrderedDict[str, Cluster] = {}
         self.__custom_cp: bool = custom_cp
         self.__is_destroyed: bool = False
 
@@ -99,11 +93,6 @@ class Controller(metaclass=Singleton):
         self.__startup['log_buffer'].open_perf_buffer(self.__log_function)
         Thread(target=self.__start_poll, args=(), daemon=True).start()
 
-        # Starting daemon process to poll perf buffers for messages
-        CPProcess(target_fun=self.__startup.perf_buffer_poll,
-                  ent=None, time_window=0,
-                  name="DeChainy-PerfBufferPoller",
-                  daemon=True).start()
         register(self.__del__)
 
         # Verifying received plugins_to_load, else load all plugins
@@ -433,12 +422,7 @@ class Controller(metaclass=Singleton):
         while True:
             self.__startup.perf_buffer_poll()
 
-    def __log_function(
-            self,
-            cpu: int,
-            data: ct.POINTER(
-                ct.c_void_p),
-            size: int):
+    def __log_function(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
         """Method to log message received from the Dataplane
 
         Args:
@@ -454,21 +438,20 @@ class Controller(metaclass=Singleton):
                 metadata (Metadata): The metadata of the message
                 level (c_uint64): The log level of the message
                 args (c_uint64 array): Array of maximum 4 variables to format the string
-                content (c_char array): The message string to log
+                message (c_char array): The message string to log
             """
             _fields_ = [("metadata", Metadata),
                         ("level", ct.c_uint64),
                         ("args", ct.c_uint64 * 4),
-                        ("content", ct.c_char * (size - (ct.sizeof(ct.c_uint16) * 4) - (ct.sizeof(ct.c_uint64) * 4)))]
+                        ("message", ct.c_char * (size - (ct.sizeof(ct.c_uint16) * 4) - (ct.sizeof(ct.c_uint64) * 4)))]
 
-        # TODO: check and implement LOG LEVEL controls
-        message = ct.cast(data, ct.POINTER(LogMessage)).contents
-        decoded = message.content.decode()
-        args = tuple([message.args[i] for i in range(0, decoded.count('%'))])
-        formatted = decoded % args
-        self.__logger.info(
-            f'DP log message from Probe({message.metadata.probe_id}) CPU({cpu}) '
-            f'PType({message.metadata.ptype}) IfIndex({message.metadata.ifindex}): {formatted}')
+        skb_event = ct.cast(data, ct.POINTER(LogMessage)).contents
+        plugin_name = next(itertools.islice(
+            self.__probes.keys(), skb_event.metadata.plugin_id, None))
+        probe_name = next(itertools.islice(
+            self.__probes[plugin_name].keys(), skb_event.metadata.probe_id, None))
+        self.__probes[plugin_name][probe_name].log_message(
+            skb_event.metadata, skb_event.level, skb_event.message, skb_event.args, cpu)
 
     def __parse_packet(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
         """Method to parse a packet received from the Dataplane
@@ -490,11 +473,12 @@ class Controller(metaclass=Singleton):
                         ("raw", ct.c_ubyte * (size - ct.sizeof(Metadata)))]
 
         skb_event = ct.cast(data, ct.POINTER(Packet)).contents
-
-        # TODO: forward to probe in order to handle packet
-        # TODO: create a Packet class to simplify parse
-        self.__logger.info(
-            f'CP handle packet from Probe {skb_event.metadata.probe_id} CPU({cpu}) PType({skb_event.metadata.ptype})')
+        plugin_name = next(itertools.islice(
+            self.__probes.keys(), skb_event.metadata.plugin_id, None))
+        probe_name = next(itertools.islice(
+            self.__probes[plugin_name].keys(), skb_event.metadata.probe_id, None))
+        self.__probes[plugin_name][probe_name].handle_packet_cp(
+            skb_event.metadata, skb_event.raw, cpu)
 
     def __remove_probe_programs(self, conf: Union[ProbeCompilation, SwapStateCompile]):
         """Method to remove the programs associated to a specific probe
@@ -539,15 +523,15 @@ class Controller(metaclass=Singleton):
                 # The program is not the last one in the list, so
                 # modify program CHAIN in order that the previous program calls the
                 # following one instead of the one to be removed
-                if not target[0][next_map_name][program.probe_id - 1].red_idx:
-                    target[0][next_map_name][program.probe_id - 1] =  \
+                if not target[0][next_map_name][program.program_id - 1].red_idx:
+                    target[0][next_map_name][program.program_id - 1] =  \
                         ct.c_int(target[index + 1].fd)
             else:
                 # The program is the last one in the list, so set the previous
                 # program to call the following one which will be empty
-                target[0][next_map_name][program.probe_id - 1] = \
-                    target[0][next_map_name][program.probe_id + 1]
-            del self.__programs[program.idx][type_of_interest][0][next_map_name][program.probe_id]
+                target[0][next_map_name][program.program_id - 1] = \
+                    target[0][next_map_name][program.program_id + 1]
+            del self.__programs[program.idx][type_of_interest][0][next_map_name][program.program_id]
             target[index].__del__()
             del self.__programs[program.idx][type_of_interest][index]
 
@@ -576,9 +560,9 @@ class Controller(metaclass=Singleton):
         """
         # Compiling the eBPF program
         b = BPF(
-            text=get_pivoting_code(
-                mode, program_type), cflags=get_cflags(
-                mode, program_type), debug=False, device=offload_device)
+            text=get_pivoting_code(mode, program_type),
+            cflags=get_cflags(mode, program_type),
+            debug=False, device=offload_device)
         f = b.load_func('handler', mode, device=offload_device)
 
         if mode == BPF.XDP:
@@ -643,16 +627,15 @@ class Controller(metaclass=Singleton):
             self.__logger.info(
                 f'Attaching program {config.name} to chain {program_type}, '
                 f'interface {config.interface}, mode {mode_map_name}')
-            current_probes = len(self.__programs[idx][map_of_interest])
+            program_id = len(self.__programs[idx][map_of_interest])
 
-            original_code, swap_code, features = config[program_type], None, {}
-            if plugin_class.is_programmable():
-                original_code, swap_code, features = precompile_parse(
-                    config[program_type])
+            original_code, swap_code, features = precompile_parse(remove_c_comments(config[program_type]))
 
             cflags = plugin_class.get_cflags(config) + config.cflags + \
-                get_cflags(mode, program_type,
-                           current_probes, config.log_level)
+                get_cflags(mode, program_type, program_id,
+                           list(self.__probes.keys()).index(config.plugin_name),
+                           len(self.__probes[config.plugin_name]),
+                           config.log_level)
 
             red_idx = None
             if config.redirect and program_type == "ingress":
@@ -664,7 +647,7 @@ class Controller(metaclass=Singleton):
                     self.__inject_pivot(
                         mode, flags, offload_device, config.redirect, red_idx, program_type, mode_map_name, parent)
                 # TODO: Next instruction when needed? It always calls bpf_redirect...
-                self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][current_probes] = \
+                self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][program_id] = \
                     ct.c_int(self.__programs[red_idx][map_of_interest][0].fd)
 
             # Compiling BPF given the formatted code, CFLAGS for the current Mode and CFLAGS
@@ -681,15 +664,14 @@ class Controller(metaclass=Singleton):
             # Loading compiled "internal_handler" function and set the previous
             # plugin program to call in the CHAIN to the current function descriptor
             p = Program(config.interface, idx, mode, b,
-                        b.load_func('internal_handler', mode,
-                                    device=offload_device).fd,
-                        current_probes, red_idx, features)
+                        b.load_func('internal_handler', mode, device=offload_device).fd,
+                        program_id, red_idx, features)
             ret[program_type] = p
 
             # Updating Service Chain
-            if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
+            if program_id - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
                 self.__programs[idx][map_of_interest][0][
-                    f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(p.fd)
+                    f'{program_type}_next_{mode_map_name}'][program_id - 1] = ct.c_int(p.fd)
 
             # Compiling swap program if needed
             if swap_code:
@@ -700,7 +682,7 @@ class Controller(metaclass=Singleton):
                 p1 = Program(config.interface, idx, mode, b1,
                              b1.load_func('internal_handler', mode,
                                           device=offload_device).fd,
-                             current_probes, red_idx, features)
+                             program_id, red_idx, features)
                 ret[program_type] = SwapStateCompile(
                     [p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
             # Append the main program to the list of programs

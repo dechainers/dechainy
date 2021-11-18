@@ -37,7 +37,7 @@ void *data = (void *) (long) ctx->data;
     uint64_t *val = BLACKLISTED_IPS.lookup(&key);
     // If the IP has matched, increment the counter and drop the packet
     if(val) {
-      dp_log(LOG_INFO, "Mitigated IP: %d", ip->saddr);
+      dp_log(DEBUG, "Mitigated IP: %d", ip->saddr);
       *val += 1;
       return DROP;
     }

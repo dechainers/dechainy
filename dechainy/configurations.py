@@ -11,22 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from enum import Enum
+import logging
 from typing import Callable, List
-from logging import INFO
 from bcc import BPF
 
 from .exceptions import MissingInterfaceInProbeException
 from .utility import Dict
-
-
-class DPLogLevel(Enum):
-    """Class to represent the log level of a datapath program."""
-    LOG_OFF = 0
-    LOG_INFO = 1
-    LOG_DEBUG = 2
-    LOG_WARN = 3
-    LOG_ERR = 4
 
 
 class AppConfig(Dict):
@@ -53,7 +43,7 @@ class AppConfig(Dict):
         self.server: ServerConfig = ServerConfig(
             obj['server']) if 'server' in obj else None
         self.custom_cp: bool = obj['custom_cp'] if 'custom_cp' in obj else True
-        self.log_level: int = obj['log_level'] if 'log_level' in obj else INFO
+        self.log_level: int = logging._nameToLevel[obj['log_level']] if 'log_level' in obj else logging.INFO
 
 
 class ServerConfig(Dict):
@@ -123,6 +113,7 @@ class ProbeConfig(Dict):
         cflags (List[str]): List of Cflags to be used while compiling programs. Default [].
         extra (Dict[str, any]): Dictionary containing additional configurations. Default None.
         debug (bool): True if the probe must be inserted in debug mode. Default False.
+        log_level(int): The log level value, accepted as string and converted accordingly. Default logging.INFO.
         redirect(str): The name of the interface you want packets to be redirect as default action, else None
         plugin_name (str): The name of the plugin. Default None. (Set by Controller)
         name (str): The name of the probe. Default None. (Set by Controller)
@@ -160,8 +151,7 @@ class ProbeConfig(Dict):
         self.extra: Dict[str, any] = obj['extra'] if 'extra' in obj else None
         self.debug: bool = obj['debug'] if 'debug' in obj else False
         self.redirect: bool = obj['redirect'] if 'redirect' in obj else None
-        self.log_level: int = DPLogLevel(
-            obj['log_level']).value if 'log_level' in obj else DPLogLevel.LOG_INFO.value
+        self.log_level: int = logging._nameToLevel[obj['log_level']] if 'log_level' in obj else logging.INFO
         # Following values are overwritten by Controller
         self.plugin_name: str = obj['plugin'] if 'plugin' in obj else None
         self.name: str = obj['name'] if 'name' in obj else None

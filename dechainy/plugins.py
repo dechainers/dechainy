@@ -17,12 +17,13 @@ from math import ceil
 from types import ModuleType
 from typing import List, Union
 from json import dumps
+from pypacker.layer12 import ethernet
 from bcc.table import QueueStack, ArrayBase, TableBase
 
 from .exceptions import HookDisabledException, MetricUnspecifiedException
 from .configurations import ClusterConfig, FirewallRule, MetricFeatures, MitigatorRule, ProbeConfig
-from .ebpf import BPF, LpmKey, Program, SwapStateCompile, ProbeCompilation, ClusterCompilation, is_batch_supp
-from .utility import Dict, CPProcess, protocol_to_int, ipv4_to_network_int, port_to_network_int, ctype_to_normal
+from .ebpf import BPF, LpmKey, Metadata, Program, SwapStateCompile, ProbeCompilation, ClusterCompilation, is_batch_supp
+from .utility import Dict, CPProcess, get_logger, protocol_to_int, ipv4_to_network_int, port_to_network_int, ctype_to_normal
 
 
 class BaseEntity:
@@ -48,6 +49,7 @@ class BaseEntity:
         self._module: ModuleType = module
         self._config: Union[ProbeConfig, ClusterConfig] = config
         self.programs: Union[ProbeCompilation, ClusterCompilation] = programs
+        self.__logger = get_logger(self.__class__.__name__, self._config.log_level)
         # If the module has a post_compilation function, call it
         if hasattr(module, "post_compilation"):
             module.post_compilation(self)
@@ -63,6 +65,8 @@ class BaseEntity:
         if self._is_destroyed:
             return
         self._is_destroyed = True
+        self.__logger.manager.loggerDict.pop(self.__logger.name)
+        self.__logger = None
         if self._proc:
             self._proc.stop()
 
@@ -81,6 +85,36 @@ class BaseEntity:
         if not hasattr(self._module, "reaction_function_rest"):
             raise AttributeError
         return self._module.reaction_function_rest(self)
+
+    def handle_packet_cp(self, metadata: Metadata, data: ct.Array, cpu: int):
+        """Function to invoke the apposite control plane function
+        to handle a Packet forwarded from the Data Plane. The invoked function
+        must accept three parameters: 1) [Plugin|Cluster], 2) Metadata, 3) pypacket.ethernet.Ethernet
+
+        Args:
+            metadata (Metadata): The Metadata retrieved from the Data Plane probe
+            data (ct.Array): The raw bytes of the packet
+            cpu (int): Number of the CPU handling the packet
+        """
+        self.__logger.info(f'Received Packet to handle from CPU {cpu}')
+
+        if hasattr(self._module, "handle_packet_cp"):
+            self._module.handle_packet_cp(self, metadata, ethernet.Ethernet(bytes(data)))
+
+    def log_message(self, metadata: Metadata, log_level: int, message: ct.Array, args: ct.Array, cpu: int):
+        """Function to log a message received from the apposite Data Plane probe
+
+        Args:
+            metadata (Metadata): The Metadata retrieved from the probe.
+            log_level (int): Log Level to be used.
+            message (ct.Array): The message as a ctype.
+            args (ct.Array): The list of arguments used to format the message.
+            cpu (int): The number of the CPU handling the message.
+        """
+        decoded_message = message.decode()
+        args = tuple([args[i] for i in range(0, decoded_message.count('%'))])
+        formatted = decoded_message % args
+        self.__logger.log(log_level, f'Message from CPU={cpu}: {formatted}')
 
     def __getitem__(self, key: str) -> Union[str, Program]:
         """Method to access directly Programs in the class

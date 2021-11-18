@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
+import logging
 import ctypes as ct
 
 from os.path import dirname
@@ -25,7 +26,7 @@ from bcc import BPF
 from bcc.table import QueueStack, TableBase
 
 from .utility import remove_c_comments, Dict as Dict_
-from .configurations import DPLogLevel, MetricFeatures
+from .configurations import MetricFeatures
 
 
 class Metadata(ct.Structure):
@@ -33,12 +34,20 @@ class Metadata(ct.Structure):
 
     Attributes:
         ifindex (c_uint32): The interface on which the packet was received
-        ptype (c_uint32): The program type ingress/egress
-        probe_id (c_uint64): The ID of the probe
+        length (c_uint32): The length of the packet
+        ptype (c_uint8): The program type ingress/egress
+        probe_id (c_uint8): The ID of the probe
+        program_id (ct.c_uint16): The ID of the program
+        plugin_id (ct.c_uint16): The ID of the plugin
+        probe_id (ct.c_uint16): The ID of the probe within the plugin
     """
     _fields_ = [("ifindex", ct.c_uint32),
-                ("ptype", ct.c_uint32),
-                ("probe_id", ct.c_uint64)]
+                ("length", ct.c_uint32),
+                ("ingress", ct.c_uint8),
+                ("xdp", ct.c_uint8),
+                ("program_id", ct.c_uint16),
+                ("plugin_id", ct.c_uint16),
+                ("probe_id", ct.c_uint16)]
 
 
 class LpmKey(ct.Structure):
@@ -61,7 +70,7 @@ class Program:
         mode (int): The program mode (XDP or TC)
         bpf (BPF): The eBPF compiled program
         fd (int, optional): The file descriptor of the main function in the program. Defaults to None.
-        probe_id (int, optional): The ID of the probe. Defaults to 0.
+        program_id (int, optional): The ID of the program. Defaults to 0.
         features (Dict[str, MetricFeatures]): The map of features if any. Default None.
 
     Attributes:
@@ -70,7 +79,7 @@ class Program:
         mode (int): The program mode (XDP or TC)
         bpf (BPF): The eBPF compiled program
         fd (int): The file descriptor of the main function in the program. Defaults to None.
-        probe_id (int): The ID of the probe. Defaults to 0.
+        program_id (int): The ID of the program. Defaults to 0.
         red_idx (int): Index of the interface packets are redirect, if needed
         is_destroyed (bool): Boolean value set to True when the instance is destroyed
         features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
@@ -83,14 +92,14 @@ class Program:
             mode: int,
             bpf: BPF,
             fd: int = None,
-            probe_id: int = 0,
+            program_id: int = 0,
             red_idx: int = 0,
             features: Dict[str, MetricFeatures] = {}):
         self.interface = interface
         self.idx = idx
         self.mode = mode
         self.fd = fd
-        self.probe_id = probe_id
+        self.program_id = program_id
         self.red_idx = red_idx
         self.bpf = bpf
         self.features = features
@@ -139,18 +148,18 @@ class SwapStateCompile:
     def __init__(self, programs: List[Program], chain_map: TableBase):
         self.__is_destroyed = False
         self.__index: int = 0
-        self.__programs: List[Program] = programs
+        self._programs: List[Program] = programs
         self.__chain_map: TableBase = chain_map
-        self.__programs_id: int = programs[0].probe_id
+        self.__programs_id: int = programs[0].program_id
         self.features: Dict[str, MetricFeatures] = programs[0].features
 
     def __del__(self):
         if self.__is_destroyed:
             return
         self.__is_destroyed = True
-        del self.__programs[0]
-        del self.__programs[1]
-        self.__programs = []
+        del self._programs[0]
+        del self._programs[1]
+        self._programs = []
 
     def trigger_read(self):
         """Method to trigger the read of the maps, meaning to swap in and out the programs"""
@@ -158,7 +167,7 @@ class SwapStateCompile:
             exit(1)
         self.__index = (self.__index + 1) % 2
         self.__chain_map[self.__programs_id-1] = ct.c_int(
-            self.__programs[self.__index].fd)
+            self._programs[self.__index].fd)
 
     def __getitem__(self, key: any) -> any:
         """Method to read from a swapped-out program map the value, given the key
@@ -174,7 +183,7 @@ class SwapStateCompile:
         index_to_read = int(not self.__index)
         if index_to_read == 1 and key in self.features:
             key += "_1"
-        return self.__programs[index_to_read][key]
+        return self._programs[index_to_read][key]
 
 
 class ProbeCompilation(Dict_):
@@ -255,10 +264,10 @@ with open(f'{__base_dir}/helpers.h', 'r') as fp:
 __is_batch_supp = None
 
 ########################################################################
-#   #NOTE: generic/SKB (xdpgeneric), native/driver (xdp), and hardware offload (xdpoffload)
-#   #define XDP_FLAGS_SKB_MODE      (1U << 1)
-#   #define XDP_FLAGS_DRV_MODE      (1U << 2)
-#   #define XDP_FLAGS_HW_MODE       (1U << 3)
+#   NOTE: generic/SKB (xdpgeneric), native/driver (xdp), and hardware offload (xdpoffload)
+#   define XDP_FLAGS_SKB_MODE      (1U << 1)
+#   define XDP_FLAGS_DRV_MODE      (1U << 2)
+#   define XDP_FLAGS_HW_MODE       (1U << 3)
 ########################################################################
 BPF.TC_ACT_OK = 0
 BPF.TC_ACT_SHOT = 2
@@ -275,7 +284,8 @@ __TC_CFLAGS = [
     f'-DCTXTYPE={BPF.TC_STRUCT}',
     f'-DPASS={BPF.TC_ACT_OK}',
     f'-DDROP={BPF.TC_ACT_SHOT}',
-    f'-DREDIRECT={BPF.TC_REDIRECT}']
+    f'-DREDIRECT={BPF.TC_REDIRECT}',
+    '-DXDP=0']
 
 __XDP_CFLAGS = [
     f'-DCTXTYPE={BPF.XDP_STRUCT}',
@@ -288,7 +298,7 @@ __XDP_CFLAGS = [
 __DEFAULT_CFLAGS = [
     "-w",
     f'-DMAX_PROGRAMS_PER_HOOK={__MAX_PROGRAMS_PER_HOOK}',
-    f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x.name}={x.value}' for x in list(DPLogLevel)]
+    f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x}={y}' for x, y in logging._nameToLevel.items()]
 
 
 def get_startup_code() -> str:
@@ -332,8 +342,6 @@ def get_formatted_code(
     """
     if not code:
         return ''
-    # Removing C-like comments
-    code = remove_c_comments(code)
     # Finding dp_log function invocations if any, and reverse to avoid bad
     # indexes while updating
     matches = [(m.start(), m.end())
@@ -379,22 +387,26 @@ def get_bpf_values(mode: int, flags: int, interface: str, program_type: str) -> 
 def get_cflags(
         mode: int,
         program_type: str,
+        program_id: int = 0,
+        plugin_id: int = 0,
         probe_id: int = 0,
-        log_level: int = DPLogLevel.LOG_INFO.value) -> List[str]:
+        log_level: int = logging.INFO) -> List[str]:
     """Function to return CFLAGS according to ingress/egress and TC/XDP
 
     Args:
         mode (int): The program mode (XDP or TC)
         program_type (str): The hook of the program (ingress/egress)
-        probe_id (int, optional): The ID of the probe to be created. Defaults to 0.
-        log_level (int, optional): The Log Level of the probe. Defaults to DPLogLevel.LOG_INFO.
+        program_id (int, optional): The ID of the program to be created. Defaults to 0.
+        plugin_id (int, optional): The ID of the plugin. Defaults to 0.
+        probe_id (int, optional): The ID of the probe within the plugin. Defaults to 0.
+        log_level (int, optional): The Log Level of the probe. Defaults to logging.INFO.
 
     Returns:
         List[str]: The list of computed cflags
     """
-    return [f'-DPROBE_ID={probe_id}', f'-DPTYPE={0 if program_type == "ingress" else 1}', f'-DLOG_LEVEL={log_level}'] \
-        + __DEFAULT_CFLAGS \
-        + (__TC_CFLAGS if mode == BPF.SCHED_CLS else __XDP_CFLAGS)
+    return __DEFAULT_CFLAGS + (__TC_CFLAGS if mode == BPF.SCHED_CLS else __XDP_CFLAGS) + \
+        [f'-DPROGRAM_ID={program_id}', f'-DPLUGIN_ID={plugin_id}', f'-DINGRESS={1 if program_type == "ingress" else 0}',
+         f'-DPROBE_ID={probe_id}', f'-DLOG_LEVEL={log_level}']
 
 
 def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeatures]]:
@@ -409,7 +421,7 @@ def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeat
     """
     # Find map declarations, from the end to the beginning
     declarations = [(m.start(), m.end(), m.group()) for m in finditer(
-        r"^(BPF_TABLE|BPF_QUEUESTACK).*$", original_code, MULTILINE)]
+        r"^(BPF_TABLE|BPF_QUEUESTACK|BPF_PERF).*$", original_code, MULTILINE)]
     declarations.reverse()
 
     # Check if at least one map needs swap
@@ -420,8 +432,8 @@ def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeat
     maps = {}
     for start, end, declaration in declarations:
         new_decl, splitted = declaration, declaration.split(',')
-        map_name = splitted[1].strip(
-        ) if "BPF_Q" in declaration else splitted[3].strip()
+        map_name = splitted[1].split(")")[0].strip(
+        ) if ("BPF_Q" in declaration or "BPF_P" in declaration) else splitted[3].split(")")[0].strip()
 
         # Check if this declaration has some attribute
         if "__attributes__" in declaration:
@@ -438,10 +450,15 @@ def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeat
             prefix_decl = tmp[0]
             map_type = tmp[1]
             # if no shared/public/pinned or already extern then adjust declaration
-            if "BPF_TABLE_" not in prefix_decl and "BPF_QUEUESTACK_" not in prefix_decl and "extern" not in map_type:
-                orig_decl = orig_decl.replace(map_type, '"extern"')
-                index = len(prefix_decl)
-                orig_decl = orig_decl[:index] + "_SHARED" + orig_decl[index:]
+            if prefix_decl.count("_") <= 1:
+                if "extern" not in map_type:
+                    new_decl = new_decl.replace(map_type, '"extern"')
+                    index = len(prefix_decl)
+                    orig_decl = orig_decl[:index] + \
+                        "_SHARED" + orig_decl[index:]
+            else:
+                new_decl = new_decl.replace(map_type, '"extern"').replace(
+                    prefix_decl, '_'.join(prefix_decl.split("_")[:2]))
 
         original_code = original_code[:start] + orig_decl + original_code[end:]
         if cloned_code:

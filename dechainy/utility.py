@@ -22,6 +22,7 @@ from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
 from multiprocessing import Process
 from typing import Callable
+from logging import Logger, getLogger, StreamHandler, Formatter
 
 
 class Dict(dict):
@@ -93,6 +94,26 @@ def remove_c_comments(text: str) -> str:
         re.DOTALL | re.MULTILINE
     )
     return re.sub(pattern, replacer, text)
+
+
+def get_logger(name: str, log_level: int) -> Logger:
+    """Function to return a proper logger as required
+
+    Args:
+        name (str): Name of the Logger
+        log_level (int): Log Level to set
+
+    Returns:
+        Logger: The Logger ready to be used
+    """
+    logger = getLogger(name)
+    logger.setLevel(log_level)
+    ch = StreamHandler()
+    ch.setLevel(log_level)
+    ch.setFormatter(
+        Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(ch)
+    return logger
 
 
 # Simple dictionary containing protocol names and their integer value

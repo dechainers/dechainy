@@ -23,11 +23,13 @@ setuptools.setup(
     name="DeChainy",
     author="Simone Magnani",
     author_email="simonemagnani.96@gmail.com",
+    version="1.1.2",
     description="An open source framework to easily build and deploy eBPF/XDP network monitoring probes and clusters",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/s41m0n/dechainy",
     packages=setuptools.find_packages(exclude=("tests",)),
+    license_files=("LICENSE",),
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache-2.0 License",
