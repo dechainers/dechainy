@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import List, Union
-from ..configurations import MitigatorRule
-from .. import exceptions, Controller
-from ..plugins import Mitigator
-from flask import abort, Blueprint, request
-from json import loads
+from ... import exceptions
+from . import Mitigator, MitigatorRule
+from flask import abort, Blueprint, request, jsonify, current_app
+
+from . import MitigatorRule
+
 
 __plugin_name = Mitigator.__name__.lower()
-__rule_file_name = 'rule'
-
-# getting the reference to the singleton
-controller = Controller()
 
 bp = Blueprint(__plugin_name, __name__)
 
@@ -39,8 +36,7 @@ def reset_rules(probe_name: str) -> str:
         str: The number of rules deleted
     """
     try:
-        return controller.execute_cp_function_probe(
-            __plugin_name, probe_name, 'reset')
+        return jsonify(current_app.config["controller"].get_probe(__plugin_name, probe_name).reset())
     except exceptions.ProbeNotFoundException as e:
         abort(404, e)
     except exceptions.UnsupportedOperationException as e:
@@ -48,7 +44,7 @@ def reset_rules(probe_name: str) -> str:
 
 
 @bp.route(f'/plugins/{__plugin_name}/<probe_name>/rules', methods=['GET', 'POST', 'DELETE'])
-def manage_blacklist(probe_name: str) -> Union[List[MitigatorRule], str]:
+def manage_rules(probe_name: str) -> Union[List[MitigatorRule], str]:
     """Rest endpoint to get, create or delete a given rule of a specific Mitigator instance
 
     Args:
@@ -58,17 +54,16 @@ def manage_blacklist(probe_name: str) -> Union[List[MitigatorRule], str]:
         Union[List[MitigatorRule], str]: The rules if GET request, else the ID of the deleted/modified one
     """
     try:
+        probe = current_app.config["controller"].get_probe(__plugin_name, probe_name)
         if request.method == 'GET':
-            return controller.execute_cp_function_probe(
-                __plugin_name, probe_name, 'get')
+            return jsonify(probe.get())
 
-        if not request.json and not request.files[__rule_file_name]:
+        if not request.json:
             abort(400, 'A rule is needed')
-
-        rule = request.json or loads(request.files[__rule_file_name].read())
-
-        return controller.execute_cp_function_probe(
-            __plugin_name, probe_name, 'insert' if request.method == 'POST' else 'delete', MitigatorRule(rule))
+            
+        rule = MitigatorRule(**request.json)
+        
+        return jsonify(probe.insert(rule) if request.method == 'POST' else probe.delete(rule))
     except (exceptions.ProbeNotFoundException, exceptions.UnsupportedOperationException,
             MemoryError, IndexError, LookupError) as e:
         abort(404, e)
@@ -86,22 +81,19 @@ def manage_rule_at(probe_name: str, rule_id: int) -> Union[MitigatorRule, str]:
         Union[MitigatorRule, str]: The rule if GET request, else its ID
     """
     try:
-        if request.method == 'GET':
-            return controller.execute_cp_function_probe(
-                __plugin_name, probe_name, 'get_at', rule_id)
+        probe = current_app.config["controller"].get_probe(__plugin_name, probe_name)
+        
+        if request.method == 'GET':    
+            return jsonify(probe.get_at(rule_id))
 
         if request.method == 'DELETE':
-            return controller.execute_cp_function_probe(
-                __plugin_name, probe_name, 'delete_at', rule_id)
+            return jsonify(probe.delete_at(rule_id))
 
-        if not request.json and not request.files[__rule_file_name]:
+        if not request.json:
             abort(400, 'A rule is needed')
 
-        rule = request.json or loads(request.files[__rule_file_name].read())
-
-        return controller.execute_cp_function_probe(
-            __plugin_name, probe_name, 'insert_at' if request.method == 'POST' else 'update', rule_id, MitigatorRule(rule))
-
+        rule = MitigatorRule(**request.json)
+        return jsonify(probe.insert_at(rule_id, rule) if request.method == 'POST' else probe.update(rule_id, MitigatorRule(rule)))
     except (exceptions.ProbeNotFoundException, exceptions.UnsupportedOperationException,
             MemoryError, IndexError, LookupError) as e:
         abort(404, e)

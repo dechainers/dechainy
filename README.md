@@ -9,6 +9,8 @@
 
 An open source framework to easily build and deploy eBPF/XDP network monitoring probes and clusters of probes, in order to perform Service Programs Chain efficiently. This framework is supposed to help and ease life to both new eBPD/XDP users, and to the ones who need to customize more their programs. DeChainy is not supposed to substitute already existent framework; on the other hand, its aim is to offer a wider choice of possibilities for also those users who are experimenting eBPF with other Python-friendly technologies, like TensorFlow (for Machine Learning).
 
+If you like this project, you can [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif)](https://www.paypal.com/donate/?business=ET3DHBDGGZ9SL&no_recurring=0&currency_code=EUR) via PayPal.
+
 ## Quick links
 
 Here follows a list of useful guides:

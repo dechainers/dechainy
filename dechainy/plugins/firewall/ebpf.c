@@ -128,7 +128,7 @@ int handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {
     if (word_match) {
       // Computing the ID
       int rule_id = (word * 64) + first_bit_set_pos(word_match);
-      dp_log(LOG_INFO, "Matched RuleId: %d", rule_id);
+      dp_log(INFO, "Matched RuleId: %d", rule_id);
       uint8_t *action = ACTIONS.lookup(&rule_id);
       if (!action) {
         return FW_ACTION_DEFAULT;

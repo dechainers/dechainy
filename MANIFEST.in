@@ -1,1 +1,1 @@
-recursive-include dechainy/sourcebpf *.c *.h
+recursive-include dechainy *.c *.h

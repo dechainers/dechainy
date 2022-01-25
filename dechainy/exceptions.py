@@ -14,16 +14,32 @@
 
 
 class PluginNotFoundException(Exception):
-    """
-    Exception to be thrown when the desired Plugin has not been found
-    """
+    """Exception to be thrown when the desired Plugin has not been found"""
+    pass
+
+
+class PluginAlreadyExistsException(Exception):
+    """Exception to be thrown when the desired Plugin to create already exists"""
     pass
 
 
 class ProbeNotFoundException(Exception):
-    """
-    Exception to be thrown when the desired Probe has not been found
-    """
+    """Exception to be thrown when the desired Probe has not been found"""
+    pass
+
+
+class ProbeAlreadyExistsException(Exception):
+    """Exception to be thrown when the desired Probe already exists in the system"""
+    pass
+
+
+class ClusterNotFoundException(Exception):
+    """Exception to be thrown when the desired Cluster has not been found"""
+    pass
+
+
+class ClusterAlreadyExistsException(Exception):
+    """Exception to be thrown when the desired Cluster already exists"""
     pass
 
 
@@ -34,23 +50,9 @@ class UnsupportedOperationException(Exception):
     pass
 
 
-class ProbeAlreadyExistsException(Exception):
-    """
-    Exception to be thrown when the desired Probe already exists in the system
-    """
-    pass
-
-
-class ClusterNotFoundException(Exception):
-    """
-    Exception to be thrown when the desired Cluster has not been found
-    """
-    pass
-
-
 class ProbeInClusterException(Exception):
     """
-    Exception to be thrown when the desired plugin to delete is in a Cluster
+    Exception to be thrown when the desired probe to delete is in a Cluster
     """
     pass
 
@@ -86,13 +88,6 @@ class NoCodeProbeException(Exception):
 class MetricUnspecifiedException(Exception):
     """
     Exception to be thrown when requiring a specific metric not specified in the Adaptmon code
-    """
-    pass
-
-
-class CustomCPDisabledException(Exception):
-    """
-    Exception to be thrown when executing custom Control Plane functions that are disabled.
     """
     pass
 

@@ -16,19 +16,14 @@ import re
 import os
 import signal
 import time
-import setproctitle
+import socket
+import logging
 
 from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
 from multiprocessing import Process
+from threading import Event, Thread
 from typing import Callable
-
-
-class Dict(dict):
-    """Utility class to define a Class  attributes accessible also with square brackets"""
-    __delattr__ = dict.__delitem__
-    __setattr__ = dict.__setitem__
-    __getattr__ = dict.get
 
 
 class Singleton(type):
@@ -57,19 +52,45 @@ class CPProcess(Process):
         daemon (bool): The daemon mode. Default False.
     """
 
-    def __init__(self, target_fun: Callable, ent, time_window: float, name: str, daemon: bool = False):
+    def __init__(self, target_fun: Callable, ent, time_window: float, daemon: bool = False):
         Process.__init__(self, target=self.cp_run, args=(
-            target_fun, ent, time_window, name,), daemon=daemon)
+            target_fun, ent, time_window,), daemon=daemon)
 
     def stop(self):
         """Function called by the proprietary to stop the Process"""
         os.kill(self.pid, signal.SIGINT)
 
-    def cp_run(self, target_fun, ent, time_window, name):
+    def cp_run(self, target_fun, ent, time_window):
         """Function to execute the provided function, if no stop signal registered within the time_window provided."""
-        setproctitle.setproctitle(name)
         while True:
             time.sleep(time_window)
+            target_fun(ent) if ent else target_fun()
+
+
+class CPThread(Thread):
+    """Utility class to create a daemon thread (stopped when destroying its proprietary)
+    to execute a function locally every time_window.
+    Args:
+        target (Callable): The function to execute
+        args (tuple): The arguments provided
+        timeout (int): The periodic restart value
+    Attributes:
+        func (Callable): The function to be executed
+        args (tuple): The arguments provided to the function
+        time_window (int): The timeout used for the thread to re-start
+    """
+    def __init__(self, target_fun: Callable, ent, time_window: float, daemon: bool = False):
+        self.__stop_event: Event = Event()
+        Thread.__init__(self, target=self.cp_run, args=(
+            target_fun, ent, time_window,), daemon=daemon)
+
+    def stop(self):
+        """Function called by the proprietary to stop the Thread"""
+        self.__stop_event.set()
+
+    def cp_run(self, target_fun, ent, time_window):
+        """Function to execute the provided function, if no stop signal registered within the time_window provided."""
+        while not self.__stop_event.wait(time_window):
             target_fun(ent) if ent else target_fun()
 
 
@@ -95,12 +116,7 @@ def remove_c_comments(text: str) -> str:
     return re.sub(pattern, replacer, text)
 
 
-# Simple dictionary containing protocol names and their integer value
-__protocol_map = {
-    "ICMP": 1,
-    "TCP": 6,
-    "UDP": 17
-}
+__proto_int_to_str = {num:name[8:] for name,num in vars(socket).items() if name.startswith("IPPROTO")}
 
 
 def protocol_to_int(name: str) -> int:
@@ -112,7 +128,7 @@ def protocol_to_int(name: str) -> int:
     Returns:
         int: the integer value of the protocol
     """
-    return __protocol_map[name.upper()]
+    return socket.getprotobyname(name)
 
 
 def protocol_to_string(value: int) -> str:
@@ -127,10 +143,7 @@ def protocol_to_string(value: int) -> str:
     Returns:
         str: the name of the protocol
     """
-    for key, val in __protocol_map.items():
-        if val == value:
-            return key
-    raise Exception(f"Unknown Protocol {value}")
+    return __proto_int_to_str[value]
 
 
 def ipv4_to_network_int(address: str) -> int:
@@ -222,3 +235,22 @@ def ctype_to_normal(obj: any) -> any:
                 result[key] = ctype_to_normal(value)
 
         return result
+
+
+def get_logger(name, filepath=None, log_level: int = logging.INFO):
+    logger = logging.getLogger(name)
+    logger.setLevel(log_level)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handlers = [logging.StreamHandler()]
+    if filepath:
+        handlers.append(logging.FileHandler(filepath, mode="w"))
+    for h in handlers:
+        h.setLevel(log_level)
+        h.setFormatter(formatter)
+        logger.addHandler(h)
+    return logger
+
+
+def log_and_raise(logger, msg: str, exception: Exception = Exception):
+    logger.error(msg)
+    raise exception(msg)

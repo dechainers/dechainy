@@ -116,38 +116,47 @@ struct icmphdr {
 
 // Structure containing packet's metadata
 struct pkt_metadata {
-  u32 ifindex;       // The interface on which the packet was received.
-  u32 ptype;         // The program type ingress/egress
-  u64 probe_id;      // The id of the calling probe
+  u32 ifindex;           // The interface on which the packet was received.
+  u32 length;            // The length of the packet
+  u8 ingress;            // The program type ingress/egress
+  u8 xdp;                // The program mode xdp/tc
+  u16 program_id;        // The id of the calling program
+  u16 plugin_id;         // The id of the plugin
+  u16 probe_id;          // The id of the probe
 } __attribute__((packed));
 
 // Key for the LPM_TRIE maps, implementing the Longest Prefix Match on IP addresses
 struct lpm_key {
   u32 netmask_len;       // Length of the netmask
-  __be32 ip;             // Ip address
+  u32 ip;                // Ip address in network byte order
 } __attribute__((packed));
 
 // Struct for logging packets
-#define LOG_STRUCT(_level, _msg, ...)           \
+#define LOG_STRUCT(_level, _msg, ...)                 \
   struct __attribute__((__packed__)) LogMsg {         \
     struct pkt_metadata md;                           \
     uint64_t level;                                   \
     uint64_t args[4];                                 \
-    char msg[sizeof(_msg)];                           \
+    char message[sizeof(_msg)];                       \
   } msg_struct = {*md, _level, {__VA_ARGS__}, _msg};
 
-// extern buffer events
-struct log_table_t { \
-  int key;                                            \
-  u32 leaf;                                           \
-  int (*perf_submit) (void *, void *, u32);           \
-  int (*perf_submit_skb) (void *, u32, void *, u32);  \
-  u32 data[0];                                        \
-};                                                    \
-__attribute__((section("maps/extern")))               \
-struct log_table_t log_buffer;
-__attribute__((section("maps/extern")))               \
-struct log_table_t control_plane;
+// Table for pushing custom events to userspace via perf buffer
+struct log_table_t {
+  int key;
+  u32 leaf;
+  int (*perf_submit) (void *, void *, u32);
+  int (*perf_submit_skb) (void *, u32, void *, u32);
+  u32 data[0];
+};
+
+// Declaring macros for perf buffers (even for perf output)
+#define BPF_PERF(ATTR, NAME) __attribute__((section("maps/" ATTR))) struct log_table_t NAME
+#define BPF_PERF_SHARED(ATTR, NAME) BPF_PERF(ATTR, NAME); __attribute__((section("maps/export"))) struct log_table_t __##NAME
+
+// Declaring extern log table and control plane table
+// previously declared in startup.sh
+BPF_PERF("extern", log_buffer);
+BPF_PERF("extern", control_plane);
 
 // NB: 'dp_log' function helper is added from ebpf.py
 
@@ -162,13 +171,17 @@ int pkt_to_controller(struct CTXTYPE *ctx, struct pkt_metadata *md) {
 }
 
 // Helper to compute Unix Epoch time
-static __always_inline
-uint64_t get_time_epoch() {
+u64 get_time_epoch(struct CTXTYPE *ctx) {
+#ifdef XDP
   return EPOCH_BASE + bpf_ktime_get_ns();
+#else
+  return ctx->tstamp ? ctx->tstamp : EPOCH_BASE + bpf_ktime_get_ns();
+#endif
 }
 
 // Helper to get the n° of the 1st bit set to 1
-static __always_inline int first_bit_set_pos(u64 x)
+static __always_inline 
+int first_bit_set_pos(u64 x)
 {
   int bits = 64, num = 64 - 1;
   u64 zero = 0;

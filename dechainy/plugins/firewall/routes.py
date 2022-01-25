@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import List, Union
-from .. import exceptions, Controller
-from ..configurations import FirewallRule
-from ..plugins import Firewall
-from flask import abort, Blueprint, request
 from json import loads
+from flask import abort, Blueprint, request, current_app, jsonify
+
+from . import FirewallRule
+from ... import exceptions
+from ...plugins.firewall import Firewall
 
 __plugin_name = Firewall.__name__.lower()
-__rule_file_name = 'rule'
-
-# getting the reference to the singleton
-controller = Controller()
 
 bp = Blueprint(__plugin_name, __name__)
 
@@ -39,8 +36,7 @@ def reset_rules(probe_name: str, program_type: str) -> str:
         str: The number of rules deleted
     """
     try:
-        return controller.execute_cp_function_probe(
-            __plugin_name, probe_name, 'reset', program_type)
+        return current_app.config["controller"].get_probe(__plugin_name, probe_name).reset(program_type)
     except (exceptions.ProbeNotFoundException, exceptions.HookDisabledException) as e:
         abort(404, e)
     except exceptions.UnsupportedOperationException as e:
@@ -59,17 +55,15 @@ def manage_rules(probe_name: str, program_type: str) -> Union[List[FirewallRule]
         Union[List[FirewallRule], str]: The rules if GET request, else the ID of the deleted/modified one
     """
     try:
+        probe = current_app.config["controller"].get_probe(__plugin_name, probe_name)
+        
         if request.method == 'GET':
-            return controller.execute_cp_function_probe(
-                __plugin_name, probe_name, 'get', program_type)
+            return jsonify(probe.get(program_type))
 
-        if not request.json and not request.files[__rule_file_name]:
+        if not request.json:
             abort(400, 'A rule is needed')
 
-        rule = request.json or loads(request.files[__rule_file_name].read())
-
-        return controller.execute_cp_function_probe(
-            __plugin_name, probe_name, 'insert' if request.method == 'POST' else 'delete', program_type, FirewallRule(rule))
+        return jsonify(probe.insert(program_type, FirewallRule(**request.json)) if request.method == 'POST' else probe.delete(program_type, FirewallRule(**request.json)))
     except (exceptions.ProbeNotFoundException, exceptions.UnsupportedOperationException,
             exceptions.HookDisabledException, MemoryError, IndexError, LookupError) as e:
         abort(404, e)
@@ -88,21 +82,18 @@ def manage_rule_at(probe_name: str, program_type: str, id: int) -> Union[Firewal
         Union[FirewallRule, str]: The rule if GET request, else its ID
     """
     try:
+        probe = current_app.config["controller"].get_probe(__plugin_name, probe_name)
+        
         if request.method == 'GET':
-            return controller.execute_cp_function_probe(
-                __plugin_name, probe_name, 'get_at', program_type, id)
+            return jsonify(probe.get_at(program_type, id))
 
         if request.method == 'DELETE':
-            return controller.execute_cp_function_probe(
-                __plugin_name, probe_name, 'delete_at', program_type, id)
+            return jsonify(probe.delete_at(program_type, id))
 
-        if not request.json and not request.files[__rule_file_name]:
+        if not request.json:
             abort(400, 'A rule is needed')
 
-        rule = request.json or loads(request.files[__rule_file_name].read())
-
-        return controller.execute_cp_function_probe(__plugin_name, probe_name, 'insert_at' if request.method == 'POST'
-                                                    else 'update', program_type, id, FirewallRule(rule))
+        return jsonify(probe.insert_at(program_type, id, FirewallRule(**request.json)) if request.method == 'POST' else probe.update(program_type, id, FirewallRule(**request.json)))
 
     except (exceptions.ProbeNotFoundException, exceptions.UnsupportedOperationException,
             exceptions.HookDisabledException, MemoryError, IndexError, LookupError) as e:

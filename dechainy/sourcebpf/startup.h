@@ -20,11 +20,9 @@ struct log_table_t {
   int (*perf_submit_skb) (void *, u32, void *, u32);
   u32 data[0];
 };
-__attribute__((section("maps/perf_output")))
-struct log_table_t log_buffer;
-__attribute__((section("maps/export")))
-struct log_table_t __log_buffer;
-__attribute__((section("maps/perf_output")))
-struct log_table_t control_plane;
-__attribute__((section("maps/export")))
-struct log_table_t __control_plane;
+
+#define BPF_PERF(ATTR, NAME) __attribute__((section("maps/" ATTR))) struct log_table_t NAME
+#define BPF_PERF_SHARED(ATTR, NAME) BPF_PERF(ATTR, NAME); __attribute__((section("maps/export"))) struct log_table_t __##NAME
+
+BPF_PERF_SHARED("perf_output", log_buffer);
+BPF_PERF_SHARED("perf_output", control_plane);

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Map containing the blacklisted IPS
-BPF_F_TABLE("lpm_trie", struct lpm_key, uint64_t, BLACKLISTED_IPS, MAX_IPS, BPF_F_NO_PREALLOC);
+BPF_F_TABLE("lpm_trie", struct lpm_key, uint64_t, BLACKLISTED_IPS, MAX_RULES, BPF_F_NO_PREALLOC);
 
 static __always_inline
 int handler(struct CTXTYPE *ctx, struct pkt_metadata *md) {
@@ -37,7 +37,7 @@ void *data = (void *) (long) ctx->data;
     uint64_t *val = BLACKLISTED_IPS.lookup(&key);
     // If the IP has matched, increment the counter and drop the packet
     if(val) {
-      dp_log(LOG_INFO, "Mitigated IP: %d", ip->saddr);
+      dp_log(INFO, "Mitigated IP: %d", ip->saddr);
       *val += 1;
       return DROP;
     }
