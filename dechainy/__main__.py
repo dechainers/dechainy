@@ -23,7 +23,7 @@ def _parse_arguments():
     parser.add_argument('-p', '--port', help='server port', type=int, default=8080)
     parser.add_argument('-l', '--load', help='comma-separated list of plugins to load (empty=all)', type=str, default="")
     parser.add_argument('-d', '--debug', help='server debug mode', action="store_true")
-    return parser.parse_args.__dict__
+    return parser.parse_args().__dict__
 
 
 def main():

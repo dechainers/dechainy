@@ -25,7 +25,7 @@ import ctypes as ct
 
 from .plugins import Cluster, Probe
 from .utility import Singleton, get_logger, log_and_raise
-from .ebpf import Metadata
+from .ebpf import Metadata, ProbeCompilation
 from . import exceptions
 
 
@@ -251,10 +251,12 @@ class Controller(metaclass=Singleton):
         self.__check_probe_exists(probe.plugin_name, probe.name, is_creating=True)
         plugin_id = list(self.__probes.keys()).index(probe.plugin_name)
         probe_id = len(self.__probes[probe.plugin_name])
+        comp = ProbeCompilation()
         for program_type in ["ingress", "egress"]:
             code = getattr(probe, program_type).code
             if not code: continue
-            setattr(probe._programs, program_type, self.__compiler.compile_hook(program_type, code, probe.interface, probe.mode, probe.flags, getattr(probe, program_type).cflags, probe.debug, plugin_id, probe_id, probe.log_level))
+            setattr(comp, program_type, self.__compiler.compile_hook(program_type, code, probe.interface, probe.mode, probe.flags, getattr(probe, program_type).cflags, probe.debug, plugin_id, probe_id, probe.log_level))
+        probe.post_compilation(comp)
         self.__probes[probe.plugin_name][probe.name] = probe
         self.__logger.info(f'Successfully created probe {probe.name} for plugin {probe.plugin_name}')
     
@@ -270,7 +272,7 @@ class Controller(metaclass=Singleton):
         """
         if not probe_name:
             self.__check_plugin_exists(plugin_name)
-            return self.__probes
+            return self.__probes[plugin_name]
         self.__check_probe_exists(plugin_name, probe_name)
         return self.__probes[plugin_name][probe_name]
 
@@ -290,6 +292,7 @@ class Controller(metaclass=Singleton):
                 f'Cluster {cluster_name} not found',
                 exceptions.ClusterNotFoundException)
 
+    '''
     def create_cluster(self, cluster_name: str, conf: ClusterConfig):
         """Function to create a cluster given its name and the configuration.
 
@@ -326,7 +329,7 @@ class Controller(metaclass=Singleton):
         self.__clusters[cluster_name] = plugins.Cluster(
             conf, module, cluster_comp)
         self.__logger.info(f'Successfully created Cluster {cluster_name}')
-    
+    '''
     def delete_cluster(self, cluster_name: str):
         """Function to delete a cluster given its name.
 

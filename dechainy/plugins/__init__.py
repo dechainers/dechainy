@@ -73,7 +73,7 @@ class Probe:
 
         self.is_in_cluster: bool = False
         self._is_destroyed: bool = False
-        self._programs: ProbeCompilation = ProbeCompilation()
+        self._programs: ProbeCompilation = None
         
         if isinstance(self.log_level, str): self.log_level = logging._nameToLevel[self.log_level]
         self._logger = get_logger(self.__class__.__name__, log_level=self.log_level)
@@ -97,7 +97,8 @@ class Probe:
             return
         self._is_destroyed = True
         self._logger.manager.loggerDict.pop(self._logger.name)
-        del self._programs
+        if self._programs:
+            del self._programs
 
     def __getitem__(self, key: str) -> Union[str, Program]:
         """Method to access directly Programs in the class
@@ -113,6 +114,9 @@ class Probe:
     @property
     def plugin_name(self) -> str:
         return self.__class__.__name__.lower()
+
+    def post_compilation(self, comp: ProbeCompilation):
+        self._programs = comp
 
     @abstractclassmethod
     def handle_packet_cp(self, metadata: Metadata, data: Array, cpu: int):

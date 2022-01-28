@@ -204,11 +204,9 @@ class ProbeCompilation:
     """Class representing the compilation object of a Probe
 
     Attributes:
-        cp_function (ModuleType): The module containing the optional Controlplane functions
         ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
         egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
     """
-    cp_function: ModuleType = None
     ingress: Union[Program, SwapStateCompile] = None
     egress: Union[Program, SwapStateCompile] = None
 

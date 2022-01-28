@@ -71,8 +71,10 @@ def manage_probe(plugin_name: str, probe_name: str = None) -> Probe:
             current_app.config['controller'].delete_probe(plugin_name, probe_name)
             return "{}_{}".format(plugin_name, probe_name)
         if request.method == 'POST':
-            config = request.json
-            probe = current_app.config['controller'].get_plugin(plugin_name).class_declaration(**config)
+            if not request.json:
+                abort(400, 'A configuration is needed')
+
+            probe = getattr(current_app.config['controller'].get_plugin(plugin_name), plugin_name.capitalize())(**request.json)
             current_app.config['controller'].create_probe(probe)
         return jsonify(current_app.config['controller'].get_probe(plugin_name, probe_name))
     except (exceptions.PluginNotFoundException, exceptions.ProbeNotFoundException, exceptions.ProbeAlreadyExistsException) as e:
@@ -102,7 +104,7 @@ def retrieve_metric(plugin_name: str, probe_name: str, program_type: str, metric
 
 
 @bp.route('/plugins', methods=['GET', 'POST'])
-@bp.route('/plugins/<plugin_name>', methods=['GET', 'DELETE'])
+@bp.route('/plugins/<plugin_name>', methods=['DELETE'])
 def manage_plugin(plugin_name: str = None) -> Union[ModuleType, List[ModuleType]]:
     """Rest endpoint to get, create or modify an instance of a given Plugin
 
@@ -114,6 +116,7 @@ def manage_plugin(plugin_name: str = None) -> Union[ModuleType, List[ModuleType]
         Union[ProbeConfig, str]: The instance if GET, else its name
     """
     try:
+        print(plugin_name)
         if request.method == 'DELETE':
             current_app.config['controller'].delete_plugin(plugin_name)
             return plugin_name
@@ -131,6 +134,11 @@ def manage_plugin(plugin_name: str = None) -> Union[ModuleType, List[ModuleType]
             os.makedirs(target)
             request.files["module"].save(os.path.join(target, "__init__.py"))
 
+            for file in ["ingress", "egress", "ebpf"]:
+                if not request.files[file]:
+                    continue
+                request.files[file].save(os.path.join(target, "{}.c".format(file)))
+            
             current_app.config['controller'].create_plugin(plugin_name, "{}.plugins.{}".format(__package__, plugin_name))
         ret = current_app.config['controller'].get_plugin(plugin_name)
         return plugin_name if plugin_name else jsonify(list(ret.keys()))
