@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,16 @@
 # limitations under the License.
 
 
+class InvalidPluginException(Exception):
+    """Exception to be thrown when Plugin is not compliant"""
+    pass
+
+
+class UnknownPluginFormatException(Exception):
+    """Exception to be thrown when Plugin format not recognized or supported"""
+    pass
+
+
 class PluginNotFoundException(Exception):
     """Exception to be thrown when the desired Plugin has not been found"""
     pass
@@ -20,6 +30,11 @@ class PluginNotFoundException(Exception):
 
 class PluginAlreadyExistsException(Exception):
     """Exception to be thrown when the desired Plugin to create already exists"""
+    pass
+
+
+class PluginUrlNotValidException(Exception):
+    """Exception to be thrown when the url of the desired Plugin to download is not valid"""
     pass
 
 
@@ -33,67 +48,21 @@ class ProbeAlreadyExistsException(Exception):
     pass
 
 
-class ClusterNotFoundException(Exception):
-    """Exception to be thrown when the desired Cluster has not been found"""
-    pass
-
-
-class ClusterAlreadyExistsException(Exception):
-    """Exception to be thrown when the desired Cluster already exists"""
-    pass
-
-
-class UnsupportedOperationException(Exception):
-    """
-    Exception to be thrown when requiring an endpoint (e.g., "/exec") not supported by the probe/cluster
-    """
-    pass
-
-
-class ProbeInClusterException(Exception):
-    """
-    Exception to be thrown when the desired probe to delete is in a Cluster
-    """
-    pass
-
-
 class UnknownInterfaceException(Exception):
-    """
-    Exception to be thrown when the desired Interface does not exist
-    """
-    pass
-
-
-class MissingInterfaceInProbeException(Exception):
-    """
-    Exception to be thrown when the Interface is not specified in the Probe Configuration
-    """
+    """Exception to be thrown when the desired Interface does not exist"""
     pass
 
 
 class HookDisabledException(Exception):
-    """
-    Exception to be thrown when performing operations on a hook that has been disabled in the probe config
-    """
+    """Exception to be thrown when performing operations on a hook that has been disabled in the probe config"""
     pass
 
 
 class NoCodeProbeException(Exception):
-    """
-    Exception to be thrown when creating a probe without at least 1 program type active
-    """
+    """Exception to be thrown when creating a probe without at least 1 program type active"""
     pass
 
 
 class MetricUnspecifiedException(Exception):
-    """
-    Exception to be thrown when requiring a specific metric not specified in the Adaptmon code
-    """
-    pass
-
-
-class ClusterWithoutCPException(Exception):
-    """
-    Exception to be thrown when creating a cluster without specifying a custom Control plane code
-    """
+    """Exception to be thrown when requiring a specific metric not specified in the Adaptmon code"""
     pass

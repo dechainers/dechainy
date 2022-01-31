@@ -19,7 +19,6 @@ Here follows a list of useful guides:
 * [Installation guide](docs/installation.md)
 * [User Manual](docs/reference_guide.md)
 * [Developer Manual](docs/developers.md)
-* [Tutorial](docs/tutorial.md)
 * [API Doc](docs/api)
 * [FAQ](docs/faq.md)
 

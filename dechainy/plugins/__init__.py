@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,34 +11,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import sys
 import ctypes as ct
 
 from abc import abstractclassmethod
-from ast import Dict
 import logging
 import os
 from dataclasses import dataclass, field
-from types import ModuleType
 from typing import List, Union
 from ctypes import Array
 from bcc.table import QueueStack, TableBase, ArrayBase
 
-from ..ebpf import MetricFeatures, Program, ProbeCompilation, Metadata, BPF, SwapStateCompile, EbpfCompiler
 from ..utility import ctype_to_normal, get_logger
+from ..ebpf import MetricFeatures, Program, ProbeCompilation, Metadata, SwapStateCompile, EbpfCompiler, BPF
 from ..exceptions import HookDisabledException, MetricUnspecifiedException, NoCodeProbeException
 
-          
+
 @dataclass
 class HookSetting:
     required: bool = False
     cflags: List[str] = field(default_factory=lambda: [])
     code: str = None
-    
+
     def __post_init__(self):
         self.code = None
 
-    
+
 @dataclass
 class Probe:
     """Base Class representing all Plugin entities.
@@ -50,13 +47,13 @@ class Probe:
     """
     name: str
     interface: str
-    mode: Union[str, int]
+    mode: Union[str, int] = 'TC'
     ingress: HookSetting = HookSetting()
     egress: HookSetting = HookSetting()
     extra: dict = field(default_factory=lambda: {})
     debug: bool = False
     log_level: Union[str, int] = logging.INFO
-    
+
     def __post_init__(self, path=__file__):
         if self.mode == 'TC':
             self.mode: int = BPF.SCHED_CLS
@@ -71,15 +68,17 @@ class Probe:
             self.mode = BPF.XDP
             self.flags = (1 << 3)
 
-        self.is_in_cluster: bool = False
         self._is_destroyed: bool = False
         self._programs: ProbeCompilation = None
-        
-        if isinstance(self.log_level, str): self.log_level = logging._nameToLevel[self.log_level]
-        self._logger = get_logger(self.__class__.__name__, log_level=self.log_level)
-            
+
+        if isinstance(self.log_level, str):
+            self.log_level = logging._nameToLevel[self.log_level]
+        self._logger = get_logger(
+            self.__class__.__name__, log_level=self.log_level)
+
         for ttype in ["ingress", "egress"]:
             hook = getattr(self, ttype)
+            hook.code = None
             if not hook.required:
                 continue
             tmp = os.path.join(os.path.dirname(path), "{}.c".format(ttype))
@@ -88,15 +87,18 @@ class Probe:
             if os.path.isfile(tmp):
                 with open(tmp, "r") as fp:
                     hook.code = fp.read()
-                continue            
+                continue
         if not self.ingress.code and not self.egress.code:
-            raise NoCodeProbeException("No Ingress/Egress Code specified for the probe {}".format(self.name))
-    
+            raise NoCodeProbeException(
+                "No Ingress/Egress Code specified for the probe {}".format(self.name))
+
     def __del__(self):
         if self._is_destroyed:
             return
         self._is_destroyed = True
-        self._logger.manager.loggerDict.pop(self._logger.name)
+        if self._logger and self._logger.name in self._logger.manager.loggerDict:
+            self._logger.manager.loggerDict.pop(self._logger.name)
+            del self._logger
         if self._programs:
             del self._programs
 
@@ -107,10 +109,10 @@ class Probe:
             key (str): The key to search into the Programs dictionary
 
         Returns:
-            Union[str, Program]: the name of the probe for the plugin (key) if Cluster, else the compiled Program
+            Union[str, Program]: the compiled Program
         """
-        return self._programs[key] if not self._is_destroyed else exit(1)
-    
+        return getattr(self._programs, key) if not self._is_destroyed else exit(1)
+
     @property
     def plugin_name(self) -> str:
         return self.__class__.__name__.lower()
@@ -120,14 +122,6 @@ class Probe:
 
     @abstractclassmethod
     def handle_packet_cp(self, metadata: Metadata, data: Array, cpu: int):
-        """Function to invoke the apposite control plane function
-        to handle a Packet forwarded from the Data Plane. The invoked function
-        must accept three parameters: 1) [Plugin|Cluster], 2) Metadata, 3) pypacket.ethernet.Ethernet
-        Args:
-            metadata (Metadata): The Metadata retrieved from the Data Plane probe
-            data (Array): The raw bytes of the packet
-            cpu (int): Number of the CPU handling the packet
-        """
         self._logger.info(f'Received Packet to handle from CPU {cpu}')
         pass
 
@@ -144,7 +138,7 @@ class Probe:
         args = tuple([args[i] for i in range(0, decoded_message.count('%'))])
         formatted = decoded_message % args
         self._logger.log(log_level, f'Message from CPU={cpu}: {formatted}')
-    
+
     def __do_retrieve_metric(map_ref: Union[QueueStack, TableBase], features: List[MetricFeatures]) -> any:
         """Internal function to retrieve data from the eBPF map
 
@@ -183,7 +177,7 @@ class Probe:
                     ret.append((ctype_to_normal(k), ctype_to_normal(v)))
                     if features.empty:
                         del map_ref[k]
-        return str(ret[0]) if len(ret) == 1 else ret
+        return ret
 
     def retrieve_metric(self, program_type: str, metric_name: str = None) -> any:
         """Function to retrieve the value of a specific metric.
@@ -214,41 +208,3 @@ class Probe:
             ret[map_name] = self.__do_retrieve_metric(
                 self.programs[program_type][map_name], features)
         return ret
-
-
-@dataclass
-class Cluster:
-    """Cluster entity class, to represent a group of probes.
-
-    Args:
-        config (ClusterConfig): The cluster configuration
-        module (ModuleType): The module containing additional user-defined functions
-        programs (ClusterCompilation): The dictionary of probes in the cluster
-    """
-    name: str
-    probes: List[Probe]
-    time_window: float = None
-    cp_function: str = None
-    extra: dict = field(default_factory=lambda: {})
-    log_level: Union[str, int] = logging.INFO
-    
-    def __post_init__(self) -> None:
-        self._programs : Dict[str, Dict[str, ProbeCompilation]] = None
-        self._is_destroyed: bool = False
-        self._module: ModuleType = None
-        
-        if isinstance(self.log_level, int):
-            self.log_level = logging._nameToLevel(self.log_level)
-            
-        if self.cp_function:
-            self._module = ModuleType(f'cluster_{self.name}')
-            sys.modules[f'cluster_{self.probe_name}'] = self._module
-            exec(self.cp_function, self._module.__dict__)
-            
-    def __del__(self):
-        if self._is_destroyed:
-            return
-        self._is_destroyed = True
-        del self._programs
-        del self._module
-        del sys.modules[f'cluster_{self.probe_name}']    

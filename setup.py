@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainy
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,9 @@
 # limitations under the License.
 import setuptools
 
+from dechainy import project_url, version
+
+
 with open("README.md", "r") as fh:
     long_description = fh.read()
 
@@ -23,11 +26,11 @@ setuptools.setup(
     name="DeChainy",
     author="Simone Magnani",
     author_email="simonemagnani.96@gmail.com",
-    version="1.1.2",
+    version=version,
     description="An open source framework to easily build and deploy eBPF/XDP network monitoring probes and clusters",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/s41m0n/dechainy",
+    url=project_url,
     packages=setuptools.find_packages(exclude=("tests",)),
     license_files=("LICENSE",),
     classifiers=[

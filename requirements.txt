@@ -1,3 +1,2 @@
-flask==1.1.2
 pyroute2==0.5.9
-pypacker==5.0
+watchdog==2.1.6

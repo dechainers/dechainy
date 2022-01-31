@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,17 +13,12 @@
 # limitations under the License.
 import ctypes as ct
 import re
-import os
-import signal
-import time
 import socket
 import logging
 
 from socket import inet_aton, htons, ntohs, inet_ntoa
 from struct import unpack
-from multiprocessing import Process
-from threading import Event, Thread
-from typing import Callable
+from weakref import ref
 
 
 class Singleton(type):
@@ -32,66 +27,14 @@ class Singleton(type):
     Attributes:
         _instance(object): The instance of the Singleton
     """
-    _instance: object = None
+    _instance: ref = lambda _: None
 
     def __call__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super(Singleton, cls).__call__(*args, **kwargs)
-        return cls._instance
-
-
-class CPProcess(Process):
-    """Utility class to create a Process (stopped when destroying its proprietary)
-    to execute a function locally every time_window.
-
-    Args:
-        target_fun (Callable): The function to execute periodically
-        ent (BaseEntity): The entity which invoked the function
-        time_window (int): The periodic restart value
-        name (str): The name of the created process
-        daemon (bool): The daemon mode. Default False.
-    """
-
-    def __init__(self, target_fun: Callable, ent, time_window: float, daemon: bool = False):
-        Process.__init__(self, target=self.cp_run, args=(
-            target_fun, ent, time_window,), daemon=daemon)
-
-    def stop(self):
-        """Function called by the proprietary to stop the Process"""
-        os.kill(self.pid, signal.SIGINT)
-
-    def cp_run(self, target_fun, ent, time_window):
-        """Function to execute the provided function, if no stop signal registered within the time_window provided."""
-        while True:
-            time.sleep(time_window)
-            target_fun(ent) if ent else target_fun()
-
-
-class CPThread(Thread):
-    """Utility class to create a daemon thread (stopped when destroying its proprietary)
-    to execute a function locally every time_window.
-    Args:
-        target (Callable): The function to execute
-        args (tuple): The arguments provided
-        timeout (int): The periodic restart value
-    Attributes:
-        func (Callable): The function to be executed
-        args (tuple): The arguments provided to the function
-        time_window (int): The timeout used for the thread to re-start
-    """
-    def __init__(self, target_fun: Callable, ent, time_window: float, daemon: bool = False):
-        self.__stop_event: Event = Event()
-        Thread.__init__(self, target=self.cp_run, args=(
-            target_fun, ent, time_window,), daemon=daemon)
-
-    def stop(self):
-        """Function called by the proprietary to stop the Thread"""
-        self.__stop_event.set()
-
-    def cp_run(self, target_fun, ent, time_window):
-        """Function to execute the provided function, if no stop signal registered within the time_window provided."""
-        while not self.__stop_event.wait(time_window):
-            target_fun(ent) if ent else target_fun()
+        if not cls._instance():
+            ctr = super(Singleton, cls).__call__(*args, **kwargs)
+            cls._instance = ref(ctr)
+            return ctr
+        return cls._instance()
 
 
 def remove_c_comments(text: str) -> str:
@@ -116,7 +59,8 @@ def remove_c_comments(text: str) -> str:
     return re.sub(pattern, replacer, text)
 
 
-__proto_int_to_str = {num:name[8:] for name,num in vars(socket).items() if name.startswith("IPPROTO")}
+__proto_int_to_str = {num: name[8:] for name, num in vars(
+    socket).items() if name.startswith("IPPROTO")}
 
 
 def protocol_to_int(name: str) -> int:
@@ -240,7 +184,8 @@ def ctype_to_normal(obj: any) -> any:
 def get_logger(name, filepath=None, log_level: int = logging.INFO):
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handlers = [logging.StreamHandler()]
     if filepath:
         handlers.append(logging.FileHandler(filepath, mode="w"))
@@ -249,8 +194,3 @@ def get_logger(name, filepath=None, log_level: int = logging.INFO):
         h.setFormatter(formatter)
         logger.addHandler(h)
     return logger
-
-
-def log_and_raise(logger, msg: str, exception: Exception = Exception):
-    logger.error(msg)
-    raise exception(msg)

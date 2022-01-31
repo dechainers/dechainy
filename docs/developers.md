@@ -17,8 +17,6 @@ Many components can be enhanced or created within this framework. The fundamenta
 - personalized control plane code is not safe to be executed, thus if you plan to use it in a real scenario please consider all the possible vulnerabilities/exploitations;
 - keep the source files as separated as possible, avoiding mixing functionalities that affects different component in the same file.
 
-Moreover, the source code is not the only one you can contribute to. In fact, there are different [tools](../tools) proposed, which implement enhanced functionalities within this framework, like DDoS detection. You can submit your own tool to enrich this list.
-
 ## 2. Documentation
 
 One of the most important rules is to develop well-documented code, in order to automatically generate the API documentation.

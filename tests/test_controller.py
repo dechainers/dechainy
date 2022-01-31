@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,22 +14,17 @@
 import unittest
 import os
 
-from dechainy.plugins import Plugin
 from dechainy.controller import Controller
 import dechainy.exceptions as exceptions
 
 
-class TestServer(unittest.TestCase):
+@unittest.skipIf(os.getuid(), reason='Root for BCC')
+class TestController(unittest.TestCase):
 
-    @unittest.skipIf(os.getuid(), reason='Root for BCC')
-    def test_add_plugin(self):
-        class MyPlugin(Plugin):
-            pass
+    def test_plugin_not_found(self):
         controller = Controller()
-        controller.create_plugin(MyPlugin.__name__, MyPlugin, None, None)
-        
         with self.assertRaises(exceptions.PluginNotFoundException):
-            controller.get_probe('plugin0', 'probe0')
+            controller.get_plugin('plugin0')
 
 
 if __name__ == '__main__':

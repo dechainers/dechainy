@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -80,13 +80,11 @@ RUN \
 CMD exec python3 -W ignore -m dechainy
 
 #######################
-# docker run --rm -it --privileged --network host -v /lib/modules:/lib/modules:ro \
+# docker run --rm -it --privileged --network host
+#   -v /lib/modules:/lib/modules:ro \
 #   -v /usr/src:/usr/src:ro \
-#   -v /etc/localtime:/etc/localtime:ro \
-#   s41m0n/dechainy:latest <---------- or dechain:ml-cpu
-#
-# Could mount every volume, to make the docker access /tmp, or mount the entire DeChainy folder
-# to "get" your local updated code, or mount even a NN model for simplicity.
+#   -v /etc/localtime:/etc/localtime:ro 
+#   s41m0n/dechainy:<tag> <your_python_code>
 #######################
 # To build for arm64 from a non-arm device
 #
