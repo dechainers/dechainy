@@ -12,28 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import atexit
+import ctypes as ct
+import dataclasses
+import itertools
 import logging
 import os
-import itertools
-import ctypes as ct
 import shutil
-
 from importlib import import_module
-from types import ModuleType
-from typing import Dict, OrderedDict, List, Union
 from threading import RLock
-from watchdog.events import FileSystemEventHandler, DirDeletedEvent, DirCreatedEvent
+from types import ModuleType
+from typing import Dict, List, OrderedDict, Type, Union
+
+from watchdog.events import (DirCreatedEvent, DirDeletedEvent, FileSystemEvent,
+                             FileSystemEventHandler)
 from watchdog.observers import Observer
 
+from . import exceptions, plugins_url
+from .ebpf import EbpfCompiler, Metadata, ProbeCompilation
 from .plugins import Probe
 from .utility import Singleton, get_logger
-from .ebpf import Metadata, ProbeCompilation, EbpfCompiler
-from . import exceptions, plugins_url
 
 
 class SyncPluginsHandler(FileSystemEventHandler):
+    """Watchdog class for file system modification to plugins and
+    synchronization with the current deployed resources.
+    If a plugin is removed from the directory, this component
+    automatically removes all the probes of that plugin for
+    coherency."""
 
-    def on_created(self, event):
+    def on_created(self, event: FileSystemEvent):
+        """Method to be called when a directory in the plugin
+        folder is created, whether it is a legitimate plugin
+        or not. If not already checked, this methods forces
+        the Controller to check the newly created Plugin validity.
+
+        Args:
+            event (FileSystemEvent): The base event.
+        """
         if not isinstance(event, DirCreatedEvent):
             return
         plugin_name = os.path.basename(event.src_path)
@@ -47,7 +62,15 @@ class SyncPluginsHandler(FileSystemEventHandler):
             except Exception:
                 pass
 
-    def on_deleted(self, event):
+    def on_deleted(self, event: FileSystemEvent):
+        """Function to be called everytime a directory is removed
+        from the plugin folder, whether it is a legitimate plugin or
+        not. This method enforces the Controller to check whether there
+        are probes of that plugin deployed, and in case remove them.
+
+        Args:
+            event (FileSystemEvent): The base event
+        """
         if not isinstance(event, DirDeletedEvent):
             return
         plugin_name = os.path.basename(event.src_path)
@@ -59,37 +82,32 @@ class SyncPluginsHandler(FileSystemEventHandler):
 
 
 class Controller(metaclass=Singleton):
-    """
-    Singleton Controller class responsible of:
-    - keeping track of probes and programs
-    - compiling/removing programs from the interfaces
+    """Class (Singleton) for managing deployed and available resources.
 
-    All its public methods can be used both within an HTTP server, or locally by calling controller.method()
+    Static Attributes:
+        _plugins_lock(RLock): The mutex for the plugins.
+        _logger (Logger): The class logger.
 
     Attributes:
-        logger (Logger): The class logger
-        declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin,
-                                            its class declaration and eBPF codes (if not customizable)
-        programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index,
-                                            the object holding all eBPF programs, for each type (TC, XDP, ingress/egress)
-        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin,
-                                            an inner dictionary holding the Plugin instance, given its name
-        is_destroyed (bool): Variable to keep track of the instance lifecycle
-        ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
-        startup (BPF): the startup eBPF compiled program, used to open perf buffers
+        __probes (Dict[str, Dict[str, Type[Probe]]]): A dictionary containing, for each plugin,
+            an inner dictionary holding the dictionary of the current deployed probes.
+        __is_destroyed (bool): Variable to keep track of the instance lifecycle.
+        __observer (Observer): Watchdog thread to keep this instance synchronised with
+            the plugin directory.
+        __compiler (EbpfCompiler): The eBPF programs compiler.
     """
     _plugins_lock: RLock = RLock()
-    _logger = get_logger("Controller")
+    _logger: logging.Logger = get_logger("Controller")
 
     def __init__(self, log_level=logging.INFO):
         Controller._logger.setLevel(log_level)
         self.__probes_lock: RLock = RLock()
         self.__probes: OrderedDict[str, Dict[str, Probe]] = {}
         self.__is_destroyed: bool = False
-        self.observer = Observer()
-        self.observer.schedule(SyncPluginsHandler(), os.path.join(
+        self.__observer = Observer()
+        self.__observer.schedule(SyncPluginsHandler(), os.path.join(
             os.path.dirname(__file__), "plugins"), recursive=True)
-        self.observer.start()
+        self.__observer.start()
         atexit.register(lambda: Controller().__del__()
                         if Controller() else None)
         self.__compiler: EbpfCompiler = EbpfCompiler(
@@ -97,13 +115,15 @@ class Controller(metaclass=Singleton):
             log_cp_callback=lambda: Controller._log_cp_callback)
 
     def __del__(self):
+        """Method to clear all the deployed resources."""
+
         if self.__is_destroyed:
             return
         self.__is_destroyed = True
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
-        self.observer = None
+        if self.__observer:
+            self.__observer.stop()
+            self.__observer.join()
+            self.__observer = None
         with self.__probes_lock:
             for k in list(self.__probes.keys()):
                 for kk in list(self.__probes[k].keys()):
@@ -113,7 +133,8 @@ class Controller(metaclass=Singleton):
         self.__compiler.__del__()
 
     def _packet_cp_callback(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
-        """Method to parse a packet received from the Dataplane
+        """Method to forward the packet received from the data plane to the
+        apposite Probe in order to be handled.
 
         Args:
             cpu (int): The CPU which registered the packet
@@ -122,11 +143,12 @@ class Controller(metaclass=Singleton):
         """
 
         class Packet(ct.Structure):
-            """Class representing a packet forwarded to the control plane
+            """Class representing a packet forwarded from the data plane
+            to the control plane.
 
             Attributes:
-                metadata (Metadata): The metadata associated to the message
-                raw (c_ubyte array): The raw data as byte array
+                metadata (Metadata): The metadata associated to the message.
+                raw (c_ubyte array): The raw data as byte array.
             """
             _fields_ = [("metadata", Metadata),
                         ("raw", ct.c_ubyte * (size - ct.sizeof(Metadata)))]
@@ -143,12 +165,13 @@ class Controller(metaclass=Singleton):
                          cpu: int,
                          data: ct.POINTER(ct.c_void_p),
                          size: int):
-        """Method to log message received from the Dataplane
+        """Method to forward the message received from the data plane
+        to the apposite Probe in order to be logged.
 
         Args:
-            cpu (int): The CPU which has registered the message
-            data (ct.POINTER): The raw structure of the message
-            size (int): The size of the entire message
+            cpu (int): The CPU which has registered the message.
+            data (ct.POINTER): The raw structure of the message.
+            size (int): The size of the entire message.
         """
 
         class LogMessage(ct.Structure):
@@ -179,6 +202,19 @@ class Controller(metaclass=Singleton):
 
     @staticmethod
     def __check_plugin_exists(plugin_name: str, is_creating: bool = False, update: bool = False):
+        """Static Internal method to check whether a plugin exists or can be created.
+
+        Args:
+            plugin_name (str): The name of the plugin.
+            is_creating (bool, optional): Variable to specify that the plugin needs to be
+                created soon. Defaults to False.
+            update (bool, optional): Variable to specify that the plugin needs to be
+                updated soon. Defaults to False.
+
+        Raises:
+            exceptions.PluginNotFoundException: When the given plugin does not exist.
+            exceptions.PluginAlreadyExistsException: When the given plugin already exist.
+        """
         target = os.path.join(os.path.dirname(
             __file__), "plugins", plugin_name)
         if not is_creating and not os.path.isdir(target):
@@ -192,17 +228,40 @@ class Controller(metaclass=Singleton):
                 shutil.rmtree(target)
 
     @staticmethod
-    def check_plugin_validity(plugin_name: str = None):
+    def check_plugin_validity(plugin_name: str):
+        """Static method to check the validity of a plugin. Validity conditions are:
+        1. in the __init__.py there is a class representing the plugin with the
+            capitalized name of the plugin (e.g., johndoe -> Johndoe);
+        2. such class needs to extend the superclass Probe;
+        3. such class needs to be a dataclass.
+
+        Args:
+            plugin_name (str, optional): The name of the plugin.
+
+        Raises:
+            exceptions.InvalidPluginException: When one of the validity condition
+                is violated.
+        """
         with Controller._plugins_lock:
             plugin = Controller.get_plugin(plugin_name)
             cls = getattr(plugin, plugin_name.capitalize(), None)
-            if not cls or not issubclass(cls, Probe):
+            if not cls or not issubclass(cls, Probe) or not dataclasses.is_dataclass(cls):
                 Controller.delete_plugin(plugin_name)
                 raise exceptions.InvalidPluginException(
                     "Plugin {} is not valid".format(plugin_name))
 
     @staticmethod
     def get_plugin(plugin_name: str = None) -> Union[ModuleType, List[ModuleType]]:
+        """Static method to return the Module of the requested plugin. If the name
+        is not provided, then all the available plugins are loaded and returned.
+
+        Args:
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
+
+        Returns:
+            Union[ModuleType, List[ModuleType]]: The list of loaded modules or the
+                target one.
+        """
         with Controller._plugins_lock:
             target_dir = os.path.join(os.path.dirname(__file__), "plugins")
             if not plugin_name:
@@ -213,6 +272,14 @@ class Controller(metaclass=Singleton):
 
     @staticmethod
     def create_plugin(variable: str, update: bool = False):
+        """Static method to create a plugin. Different types are supported:
+        1. local directory: path to a local plugin directory;
+        2. remote custom: URL to the remote repository containing the plugin to pull;
+        3. remote default: the plugin is pulled from the default dechainy_plugins repo.
+
+        Raises:
+            exceptions.UnknownPluginFormatException: When none of the above formats is provided.
+        """
         with Controller._plugins_lock:
             dest_path = os.path.join(os.path.dirname(__file__), "plugins")
 
@@ -253,6 +320,15 @@ class Controller(metaclass=Singleton):
 
     @staticmethod
     def delete_plugin(plugin_name: str = None):
+        """Static method to delete a plugin. If the name is not specified,
+        then all the plugins are deleted.
+
+        Args:
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
+
+        Raises:
+            exceptions.PluginNotFoundException: When the plugin does not exist.
+        """
         with Controller._plugins_lock:
             if plugin_name:
                 Controller.__check_plugin_exists(plugin_name)
@@ -269,14 +345,18 @@ class Controller(metaclass=Singleton):
     #####################################################################
 
     def delete_probe(self, plugin_name: str = None, probe_name: str = None):
-        """Function to delete a probe of a specific plugin.
+        """Method to delete probes. If the plugin name is not specified, then
+        all the probes deployed are deleted. Otherwise, all the probes belonging
+        to that plugins are deleted, or the target one if also the probe name
+        is specified.
 
         Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
+            probe_name (str, optional): The name of the probe. Defaults to None.
 
-        Returns:
-            str: The name of the probe deleted
+        Raises:
+            exceptions.ProbeNotFoundException: When the probe does not exist
+            exceptions.PluginNotFoundException: When the plugin does not exist.
         """
         with self.__probes_lock:
             target = []
@@ -305,18 +385,15 @@ class Controller(metaclass=Singleton):
                     f'Successfully deleted Probe {probe.name} for Plugin {probe.plugin_name}')
 
     def create_probe(self, probe: Probe):
-        """Method to create a probe instance of a specific plugin
+        """Method to create the given probe.
 
         Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
-            conf (ProbeConfig): The configuration used to create the probe
+            probe (Probe): The probe to be created.
 
         Raises:
-            NoCodeProbeException: There is no eBPF code, neither for Ingress and Egress hook
-
-        Returns:
-            Plugin: The created probe
+            exceptions.PluginNotFoundException: When the plugin does not exist.
+            exceptions.ProbeAlreadyExistsException: When a probe of the same plugin
+                and having the same name already exists.
         """
         Controller.__check_plugin_exists(probe.plugin_name)
         with self.__probes_lock:
@@ -341,15 +418,23 @@ class Controller(metaclass=Singleton):
             Controller._logger.info(
                 f'Successfully created Probe {probe.name} for Plugin {probe.plugin_name}')
 
-    def get_probe(self, plugin_name: str = None, probe_name: str = None) -> Probe:
-        """Function to return a given probe of a given plugin
+    def get_probe(self, plugin_name: str = None, probe_name: str = None)\
+            -> Union[Dict[str, Dict[str, Type[Probe]]], Dict[str, Type[Probe]], Type[Probe]]:
+        """Function to retrieve probes. If the plugin name is not specified, then
+        all the probes deployed in the system are returned. Otherwise return all the probes belonging
+        to that plugin, or just the target one if also the probe name is specified.
 
         Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
+            probe_name (str, optional): The name of the probe. Defaults to None.
+
+        Raises:
+            exceptions.ProbeNotFoundException: The requested probe has not been found.
+            exceptions.PluginNotFoundException: The requested plugin has not been found.
 
         Returns:
-            Plugin: The retrieved probe
+            Union[Dict[str, Dict[str, Type[Probe]]], Dict[str, Type[Probe]], Type[Probe]]: The Dictionary of all
+                probes, or the dictionary of probes of a specific plugin, or the target probe.
         """
         with self.__probes_lock:
             if not plugin_name:
@@ -363,6 +448,11 @@ class Controller(metaclass=Singleton):
             return self.__probes[plugin_name] if not probe_name else self.__probes[plugin_name][probe_name]
 
     def sync_plugin_probes(self, plugin_name: str):
+        """Method to remove all the probes belonging to the deleted plugin, if any.
+
+        Args:
+            plugin_name (str): The name of the plugin deleted.
+        """
         with self.__probes_lock:
             if plugin_name not in self.__probes:
                 return

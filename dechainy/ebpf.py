@@ -11,26 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass, field
-import time
-import logging
-import threading
-import os
 import atexit
 import ctypes as ct
-
-from pyroute2 import IPRoute
-from pyroute2.netlink.exceptions import NetlinkError
-from re import finditer, MULTILINE
-from subprocess import run, PIPE
-from typing import Callable, Dict, List, Tuple, Union
+import logging
+import os
+import platform
+import threading
+import time
+from dataclasses import dataclass, field
+from re import MULTILINE, finditer
 from threading import RLock
+from typing import Callable, Dict, List, Tuple, Union
 
 from bcc import BPF
 from bcc.table import QueueStack, TableBase
+from pyroute2 import IPRoute
+from pyroute2.netlink.exceptions import NetlinkError
 
-from .utility import Singleton, get_logger, remove_c_comments
 from . import exceptions
+from .utility import Singleton, get_logger, remove_c_comments
 
 ########################################################################
 #   #NOTE: generic/SKB (xdpgeneric), native/driver (xdp), and hardware offload (xdpoffload)
@@ -100,11 +99,17 @@ class Program:
         interface (str): The interface to attach the program to
         idx (int): The interface's index, retrieved using IPDB
         mode (int): The program mode (XDP or TC)
-        bpf (BPF): The eBPF compiled program
-        fd (int): The file descriptor of the main function in the program. Defaults to None.
-        program_id (int, optional): The ID of the program. Defaults to 0.
-        is_destroyed (bool): Boolean value set to True when the instance is destroyed
+        flags (int): The flags used for injecting the program.
+        code (str): The source code.
+        program_id (int): The ID of the program.
+        debug (bool): True if the program is compiled with debug info. Default to False.
+        cflags (List[str]): List of cflags for the program. Default to [].
         features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
+        offload_device (str): Device used for offloading the program. Default to None
+        bpf (BPF): The eBPF compiled program
+        f (BPF.Function): The function loaded from the program injected in the chain.
+        __is_destroyed (bool): Boolean value set to True when the instance is destroyed
+
     """
 
     interface: str
@@ -119,13 +124,14 @@ class Program:
     offload_device: str = None
 
     def __post_init__(self):
-        self.__is_destroyed = False
-        self.bpf = BPF(text=self.code, debug=self.debug,
-                       cflags=self.cflags, device=self.offload_device)
-        self.f = self.bpf.load_func(
+        self.__is_destroyed: bool = False
+        self.bpf: BPF = BPF(text=self.code, debug=self.debug,
+                            cflags=self.cflags, device=self.offload_device)
+        self.f: BPF.Function = self.bpf.load_func(
             'internal_handler', self.mode, device=self.offload_device)
 
     def __del__(self):
+        """Method to clear resources deployed in the system"""
         if self.__is_destroyed:
             return
         # Calling the BCC defined cleanup function which would have been called while exitting
@@ -135,13 +141,13 @@ class Program:
         del self.bpf
 
     def __getitem__(self, key: str) -> Union[QueueStack, TableBase]:
-        """Function to access directly the BPF map providing a key
+        """Method to access directly the BPF map providing a key.
 
         Args:
-            key (str): The name of the map
+            key (str): The name of the map.
 
         Returns:
-            Union[QueueStack, TableBase]: The eBPF map requested
+            Union[QueueStack, TableBase]: The eBPF map requested.
         """
         return self.bpf[key] if not self.__is_destroyed else exit(1)
 
@@ -151,11 +157,12 @@ class SwapStateCompile:
     """Class storing the state of a program when the SWAP of at least 1 map is required.
 
     Attributes:
-        maps (List[str]): The maps defined as swappable
-        index (int): The index of the current active program
-        programs (List[Program]): The list containing the two programs compiled
-        chain_map (TableBase): The eBPF table performing the chain
-        programs_id (int): The probe ID of the programs
+        __index (int): The index of the current active program
+        __is_destroyed (bool): Variable to keep track of the lifecycle of the object.
+        _programs (List[Program]): The list containing the two programs compiled.
+        _chain_map (TableBase): The eBPF table performing the chain.
+        program_id (int): The ID of the programs.
+        mode (int): The mode used for injecting eBPF programs.
         features (Dict[str, MetricFeatures]): The map of features if any. Default None.
     """
     _programs: List[Program]
@@ -169,6 +176,7 @@ class SwapStateCompile:
         self.features: Dict[str, MetricFeatures] = self._programs[0].features
 
     def __del__(self):
+        """Method to clear resoruces deployed in the system"""
         if self.__is_destroyed:
             return
         self.__is_destroyed = True
@@ -204,11 +212,11 @@ class SwapStateCompile:
 
 @dataclass
 class ProbeCompilation:
-    """Class representing the compilation object of a Probe
+    """Class representing the compilation object of a Probe.
 
     Attributes:
-        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
-        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
+        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook.
+        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook.
     """
     ingress: Union[Program, SwapStateCompile] = None
     egress: Union[Program, SwapStateCompile] = None
@@ -216,6 +224,13 @@ class ProbeCompilation:
 
 @dataclass
 class HookTypeHolder:
+    """Class to hold current programs and free IDs available for a specific hook of an interface.
+
+    Attributes:
+        programs (List[Program]): List of eBPF program injected.
+        ids (List[int]): List of available IDs to be used for new programs.
+        lock (RLock): Lock for the hook.
+    """
     programs: List[Program] = field(default_factory=lambda: [])
     ids: List[int] = field(default_factory=lambda: list(
         range(1, BPF._MAX_PROGRAMS_PER_HOOK)))
@@ -226,16 +241,16 @@ class HookTypeHolder:
 
 @dataclass
 class InterfaceHolder:
-    """Simple class to store information concerning the programs attached to an interface
+    """Simple class to store information concerning the programs attached to an interface.
 
     Attributes:
-        name (str): The name of the interface
-        flags (int): The flags used in injection
-        offload_device (str): The name of the device to which offload the program if any
-        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
-        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
-        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
-        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
+        name (str): The name of the interface.
+        flags (int): The flags used in injection.
+        offload_device (str): The name of the device to which offload the program if any.
+        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode.
+        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode.
+        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode.
+        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode.
     """
     name: str
     flags: int
@@ -247,27 +262,49 @@ class InterfaceHolder:
 
 
 class EbpfCompiler(metaclass=Singleton):
-    __logger = get_logger("EbpfCompiler")
-    __is_batch_supp = None
-    __base_dir = os.path.join(os.path.dirname(__file__), "sourcebpf")
-    __PARENT_INGRESS_TC = 'ffff:fff2'
-    __PARENT_EGRESS_TC = 'ffff:fff3'
-    __XDP_MAP_SUFFIX = 'xdp'
-    __TC_MAP_SUFFIX = 'tc'
+    """Class (Singleton) to handle eBPF programs compilation, injection, and deletion.
+
+    Static Attributes:
+    __logger (logging.Logger): The instance logger.
+    __is_batch_supp (bool): True if batch operations are supported. Default to None.
+    __base_dir (str): Path to the sourcebpf folder, where there are source eBPF codes.
+    __PARENT_INGRESS_TC (str): Address of the parent ingress hook in TC.
+    __PARENT_EGRESS_TC (str): Address of the parent egress hook in TC.
+    __XDP_MAP_SUFFIX (str): Suffix used for eBPF maps in XDP mode.
+    __TC_MAP_SUFFIX (str):Suffix used for eBPF maps in TC mode.
+    __EPOCH_BASE (int): Base timestamp to compute UNIX timestamps in eBPF programs.
+    __TC_CFLAGS (List[str]): List of cflags to be used in TC mode.
+    __XDP_CFLAGS (List[str]): List of cflags to be used in XDP mode.
+    __DEFAULT_CFLAGS (List[str]): List of default cflags.
+
+    Attributes:
+        __startup (BPF): Startup eBPF program, where logging and control plane buffers are declared.
+        __interfaces_programs: Dictionary holding for each interface the list of programs
+            and attributes to be used.
+        __is_destroyed (bool): Variable to keep track of the lifecycle of the object.
+
+    """
+    __logger: logging.Logger = get_logger("EbpfCompiler")
+    __is_batch_supp: bool = None
+    __base_dir: str = os.path.join(os.path.dirname(__file__), "sourcebpf")
+    __PARENT_INGRESS_TC: str = 'ffff:fff2'
+    __PARENT_EGRESS_TC: str = 'ffff:fff3'
+    __XDP_MAP_SUFFIX: str = 'xdp'
+    __TC_MAP_SUFFIX: str = 'tc'
 
     # Computing EPOCH BASE time from uptime, to synchronize bpf_ktime_get_ns()
     with open(os.path.join(os.sep, "proc", "uptime"), 'r') as f:
-        __EPOCH_BASE = int(
+        __EPOCH_BASE: int = int(
             (int(time.time() * 10**9) - int(float(f.readline().split()[0]) * (10 ** 9))))
 
-    __TC_CFLAGS = [
+    __TC_CFLAGS: List[str] = [
         f'-DCTXTYPE={BPF.TC_STRUCT}',
         f'-DPASS={BPF.TC_ACT_OK}',
         f'-DDROP={BPF.TC_ACT_SHOT}',
         f'-DREDIRECT={BPF.TC_REDIRECT}',
         '-DXDP=0']
 
-    __XDP_CFLAGS = [
+    __XDP_CFLAGS: List[str] = [
         f'-DCTXTYPE={BPF.XDP_STRUCT}',
         f'-DBACK_TX={BPF.XDP_TX}',
         f'-DPASS={BPF.XDP_PASS}',
@@ -275,7 +312,7 @@ class EbpfCompiler(metaclass=Singleton):
         f'-DREDIRECT={BPF.XDP_REDIRECT}',
         '-DXDP=1']
 
-    __DEFAULT_CFLAGS = [
+    __DEFAULT_CFLAGS: List[str] = [
         "-w",
         f'-DMAX_PROGRAMS_PER_HOOK={BPF._MAX_PROGRAMS_PER_HOOK}',
         f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x}={y}' for x, y in logging._nameToLevel.items()]
@@ -323,6 +360,7 @@ class EbpfCompiler(metaclass=Singleton):
                         if EbpfCompiler() else None)
 
     def __del__(self):
+        """Method to clear all the deployed resources from the system"""
         if self.__is_destroyed:
             return
         self.__is_destroyed = True
@@ -353,18 +391,17 @@ class EbpfCompiler(metaclass=Singleton):
             program_type: str,
             mode_map_name: str,
             parent: str):
-        """Function to inject the pivoting program into a specific interface
+        """Method to inject the pivoting program into a specific interface.
+        The program chain is setup and ready to accept services.
 
         Args:
-            mode (int): The mode of the program (XDP or TC)
-            flags (int): The flags to be used in the mode
-            offload_device (str): The device to which offload the program if any
-            interface (str): The desired interface
-            idx (int): The index of the interface
-            program_type (str): The type of the program (Ingress/Egress)
-            mode_map_name (str): The name of the map to use, retrieved from bpf helper function
-            parent (str): The parent interface
-
+            mode (int): The mode of the program (XDP or TC).
+            flags (int): The flags to be used in the mode.
+            offload_device (str): The device to which offload the program if any.
+            interface (str): The desired interface.
+            idx (int): The index of the interface.
+            program_type (str): The type of the program (Ingress/Egress).
+            mode_map_name (str): The name of the map to use, retrieved from bpf helper function.
         """
         with open(f'{EbpfCompiler.__base_dir}/pivoting.c', 'r') as fp:
             pivoting_code = remove_c_comments(fp.read())\
@@ -393,11 +430,13 @@ class EbpfCompiler(metaclass=Singleton):
                           parent=parent, classid=1, direct_action=True)
             target.programs.insert(0, p)
 
-    def remove_hook(self, program_type, program: Union[Program, SwapStateCompile]):
-        """Method to remove the programs associated to a specific probe
+    def remove_hook(self, program_type: str, program: Union[Program, SwapStateCompile]):
+        """Method to remove the program associated to a specific hook. The program chain
+        is updated by removing the service from the chain itself.
 
         Args:
-            conf (Union[ProbeCompilation, SwapStateCompile]): The object containing the programs
+            program_type (str): The hook type (ingress/egress).
+            program (Union[Program, SwapStateCompile]): The program to be deleted.
         """
         tmp = program if not isinstance(
             program, SwapStateCompile) else program._programs[0]
@@ -447,7 +486,34 @@ class EbpfCompiler(metaclass=Singleton):
             target.programs[index].__del__()
             del target.programs[index]
 
-    def compile_hook(self, program_type, code, interface, mode, flags, cflags, debug, plugin_id, probe_id, log_level):
+    def compile_hook(self, program_type: str,
+                     code: str, interface: str,
+                     mode: int, flags: int,
+                     cflags: List[str], debug: bool,
+                     plugin_id: int, probe_id: int,
+                     log_level: int) -> Union[Program, SwapStateCompile]:
+        """Method to compile program for a specific hook of an interface. If the compilation
+        succeeded, then the program chain is updated with the new service.
+
+        Args:
+            program_type (str): The hook type (ingress/egress).
+            code (str): The program source code.
+            interface (str): The interface to which attach the compiled program.
+            mode (int): The mode used for injecting the program.
+            flags (int): The flags used by the mode when injecting the program.
+            cflags (List[str]): The cflags for the program.
+            debug (bool): True if the program has to be compiled with debug info.
+            plugin_id (int): The id of the plugin.
+            probe_id (int): The id of the probe.
+            log_level (int): The loggin level.
+
+        Raises:
+            exceptions.UnknownInterfaceException: When the interface does not exist.
+
+        Returns:
+            Union[Program, SwapStateCompile]: The compiled program.
+        """
+
         try:
             with IPRoute() as ip:
                 idx = ip.link_lookup(ifname=interface)[0]
@@ -513,18 +579,18 @@ class EbpfCompiler(metaclass=Singleton):
             plugin_id: int = 0,
             probe_id: int = 0,
             log_level: int = logging.INFO) -> List[str]:
-        """Function to return CFLAGS according to ingress/egress and TC/XDP
+        """Static method to return CFLAGS according to hook and mode.
 
         Args:
-            mode (int): The program mode (XDP or TC)
-            program_type (str): The hook of the program (ingress/egress)
+            mode (int): The program mode (XDP or TC).
+            program_type (str): The hook of the program (ingress/egress).
             program_id (int, optional): The ID of the program to be created. Defaults to 0.
             plugin_id (int, optional): The ID of the plugin. Defaults to 0.
             probe_id (int, optional): The ID of the probe within the plugin. Defaults to 0.
             log_level (int, optional): The Log Level of the probe. Defaults to logging.INFO.
 
         Returns:
-            List[str]: The list of computed cflags
+            List[str]: The list of computed cflags.
         """
         return EbpfCompiler.__DEFAULT_CFLAGS + \
             (EbpfCompiler.__TC_CFLAGS if mode == BPF.SCHED_CLS else EbpfCompiler.__XDP_CFLAGS) + \
@@ -534,16 +600,16 @@ class EbpfCompiler(metaclass=Singleton):
 
     @staticmethod
     def __ebpf_values(mode: int, flags: int, interface: str, program_type: str) -> Tuple[int, int, str, str, str]:
-        """Function to return BPF map values according to ingress/egress and TC/XDP
+        """Static method to return BPF map values according to the hook and mode used.
 
         Args:
-            mode (int): The program mode (XDP or TC)
-            flags (int): Flags to be used in the mode
-            interface (str): The interface to which attach the program
-            program_type (str): The program hook (ingress/egress)
+            mode (int): The program mode (XDP or TC).
+            flags (int): Flags to be used in the mode.
+            interface (str): The interface to which attach the program.
+            program_type (str): The program hook (ingress/egress).
 
         Returns:
-            Tuple[int, int, str str, str]: The values representing the mode, the suffix for maps names and parent interface
+            Tuple[int, int, str str, str]: The values representing the mode, the suffix for maps names and parent interface.
         """
         if program_type == "egress":
             return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_EGRESS_TC
@@ -553,14 +619,14 @@ class EbpfCompiler(metaclass=Singleton):
 
     @staticmethod
     def __precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeatures]]:
-        """Function to compile additional functionalities from original code (swap, erase, and more)
+        """Static method to compile additional functionalities from original code (swap, erase, and more)
 
         Args:
-            original_code (str): The original code to be controlled
+            original_code (str): The original code to be controlled.
 
         Returns:
             Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps,
-                else the tuple containing also swap code and list of metrics configuration
+                else the tuple containing also swap code and list of metrics configuration.
         """
         # Find map declarations, from the end to the beginning
         declarations = [(m.start(), m.end(), m.group()) for m in finditer(
@@ -618,15 +684,15 @@ class EbpfCompiler(metaclass=Singleton):
             mode: int,
             program_type: str,
             code: str) -> str:
-        """Function to return the probe wrapper code according to ingress/egress, TC/XDP, and substitute dp_log function
+        """Static method to format the code accordingly to the hook and the mode
 
         Args:
-            mode (int): The program mode (XDP or TC)
-            program_type (str): The program hook (ingress/egress)
-            code (str, optional): The code to be formatted
+            mode (int): The program mode (XDP or TC).
+            program_type (str): The program hook (ingress/egress).
+            code (str, optional): The code to be formatted.
 
         Returns:
-            str: The code formatted accordingly
+            str: The code correctly formatted.
         """
         return code.replace('PROGRAM_TYPE', program_type)\
             .replace('MODE', EbpfCompiler.__TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress"
@@ -634,6 +700,18 @@ class EbpfCompiler(metaclass=Singleton):
 
     @staticmethod
     def __format_helpers(code: str) -> str:
+        """Static method to format the original program code with
+        helpers provided by the framework (e.g., dp_log, REDIRECT(<interface>)).
+
+        Args:
+            code (str): The original code to format.
+
+        Raises:
+            exceptions.UnknownInterfaceException: When the redirect interface is not recognized.
+
+        Returns:
+            str: The code correctly formatted.
+        """
         # Removing C-like comments
         code = remove_c_comments(code)
 
@@ -675,14 +753,16 @@ class EbpfCompiler(metaclass=Singleton):
 
     @staticmethod
     def is_batch_supp() -> bool:
-        """Function to check whether the batch operations are supported for this system (kernel >= v5.6)
+        """Static method to check whether the batch operations are supported for this system (kernel >= v5.6).
 
         Returns:
-            bool: True if they are supported, else otherwise
+            bool: True if they are supported, else otherwise.
         """
         if EbpfCompiler.__is_batch_supp is None:
-            major, minor = [int(x) for x in run(
-                ['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('.')[:2]]
+            release = platform.release()
+            if not release:
+                EbpfCompiler.__is_batch_supp = False
+            major, minor = [int(x) for x in release.split('.')[:2]]
             EbpfCompiler.__is_batch_supp = True if major > 5 or (
                 major == 5 and minor >= 6) else False
         return EbpfCompiler.__is_batch_supp

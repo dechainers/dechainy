@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes as ct
+import logging
 import re
 import socket
-import logging
-
-from socket import inet_aton, htons, ntohs, inet_ntoa
+from socket import htons, inet_aton, inet_ntoa, ntohs
 from struct import unpack
 from weakref import ref
 
@@ -59,10 +58,6 @@ def remove_c_comments(text: str) -> str:
     return re.sub(pattern, replacer, text)
 
 
-__proto_int_to_str = {num: name[8:] for name, num in vars(
-    socket).items() if name.startswith("IPPROTO")}
-
-
 def protocol_to_int(name: str) -> int:
     """Function to return the integer value of a protocol given its name
 
@@ -73,6 +68,10 @@ def protocol_to_int(name: str) -> int:
         int: the integer value of the protocol
     """
     return socket.getprotobyname(name)
+
+
+__proto_int_to_str = {num: name[8:] for name, num in vars(
+    socket).items() if name.startswith("IPPROTO")}
 
 
 def protocol_to_string(value: int) -> str:
@@ -181,7 +180,17 @@ def ctype_to_normal(obj: any) -> any:
         return result
 
 
-def get_logger(name, filepath=None, log_level: int = logging.INFO):
+def get_logger(name: str, filepath: str = None, log_level: int = logging.INFO) -> logging.Logger:
+    """Function to create a logger or retrieve it if already created.
+
+    Args:
+        name (str): The name of the logger.
+        filepath (str, optional): Path to the logging file, if required. Defaults to None.
+        log_level (int, optional): Log Level taken from the logging module. Defaults to logging.INFO.
+
+    Returns:
+        logging.Logger: The logger created/retrieved.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
     formatter = logging.Formatter(

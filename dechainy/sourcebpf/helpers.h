@@ -158,7 +158,9 @@ struct log_table_t {
 BPF_PERF("extern", log_buffer);
 BPF_PERF("extern", control_plane);
 
-// NB: 'dp_log' function helper is added from ebpf.py
+// ########################### NB ########################### 
+// * 'dp_log' function helper is added from ebpf.py
+// * 'REDIRECT(<interface>) helper is added from ebpf.py
 
 // Helper to send packet to controller
 static __always_inline

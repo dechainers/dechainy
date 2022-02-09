@@ -19,8 +19,8 @@ FROM ubuntu:18.04 as builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && \
-    apt-get -y install pbuilder aptitude && \
+RUN apt update -y && \
+    apt -y install pbuilder aptitude && \
     cd /root && \
     git clone https://github.com/iovisor/bcc.git
 

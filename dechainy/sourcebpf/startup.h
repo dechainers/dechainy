@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Table for pushing custom events to userspace via ring buffer
 struct log_table_t {
   int key;
   u32 leaf;
@@ -24,5 +23,8 @@ struct log_table_t {
 #define BPF_PERF(ATTR, NAME) __attribute__((section("maps/" ATTR))) struct log_table_t NAME
 #define BPF_PERF_SHARED(ATTR, NAME) BPF_PERF(ATTR, NAME); __attribute__((section("maps/export"))) struct log_table_t __##NAME
 
+// Table for logging
 BPF_PERF_SHARED("perf_output", log_buffer);
+
+// Table for pushing custom events to userspace control plane
 BPF_PERF_SHARED("perf_output", control_plane);

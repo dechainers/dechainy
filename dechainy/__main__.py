@@ -12,11 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+from typing import Dict
 
 from .controller import Controller
 
 
-def _parse_arguments():
+def _parse_arguments() -> Dict[str, any]:
+    """Function to declare and parse command line arguments
+
+    Returns:
+        Dict[str, any]: The dictionary of arguments.
+    """
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -37,9 +43,9 @@ def _parse_arguments():
 
 
 def main():
-    """Function used when the module is called as main file. It provides, given the provided (or not)
-    startup file, a running Controller and optionally a REST server
-    """
+    """Main Function to provide utility for installing/removing plugins.
+    Installation can be made from local directory, remote personal repository or
+    default dechainy_plugins repository."""
     args = _parse_arguments()
 
     if args["action"] == "remove":
