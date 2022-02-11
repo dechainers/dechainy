@@ -59,7 +59,7 @@ struct eth_hdr {
 } __attribute__((packed));
 
 /*Ip Header => https://github.com/torvalds/linux/blob/master/include/uapi/linux/ip.h */
-/*The "_" is useful if mode=XDP_SBK, since already named iphdr*/
+/*The "_" is useful if mode=BPF.XDP and XDPFlags.SKB_MODE, since already named iphdr*/
 struct iphdr_ {
 #if defined(__LITTLE_ENDIAN_BITFIELD)
     __u8    ihl:4,

@@ -1,9 +1,9 @@
-![Docker Image Test](https://github.com/s41m0n/dechainy/workflows/Docker%20Image%20Test/badge.svg)
-![Check linting](https://github.com/s41m0n/dechainy/workflows/Check%20linting/badge.svg)
-![Release](https://github.com/s41m0n/dechainy/workflows/Release/badge.svg)
-![API Doc autogen](https://github.com/s41m0n/dechainy/workflows/API%20Doc%20autogen/badge.svg)
+![Docker Image Test](https://github.com/dechainers/dechainy/workflows/Docker%20Image%20Test/badge.svg)
+![Check linting](https://github.com/dechainers/dechainy/workflows/Check%20linting/badge.svg)
+![Release](https://github.com/dechainers/dechainy/workflows/Release/badge.svg)
+![API Doc autogen](https://github.com/dechainers/dechainy/workflows/API%20Doc%20autogen/badge.svg)
 
-![DeChainy Logo](docs/dechainy-logo.png)
+![DeChainy Logo](docs/logo.png)
 
 # DeChainy
 

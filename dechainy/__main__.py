@@ -45,7 +45,7 @@ def _parse_arguments() -> Dict[str, any]:
 def main():
     """Main Function to provide utility for installing/removing plugins.
     Installation can be made from local directory, remote personal repository or
-    default dechainy_plugins repository."""
+    other dechainy_plugin_* repositories."""
     args = _parse_arguments()
 
     if args["action"] == "remove":

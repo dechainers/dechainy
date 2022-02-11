@@ -11,6 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-project_url = "https://github.com/dechainers/dechainy.git"
-plugins_url = "https://github.com/dechainers/dechainy_plugins.git"
+base_url = "https://github.com/dechainers"
+project_url = "{}/dechainy.git".format(base_url)
 version = "1.0"

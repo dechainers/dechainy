@@ -27,7 +27,7 @@ from watchdog.events import (DirCreatedEvent, DirDeletedEvent, FileSystemEvent,
                              FileSystemEventHandler)
 from watchdog.observers import Observer
 
-from . import exceptions, plugins_url
+from . import exceptions, base_url
 from .ebpf import EbpfCompiler, Metadata, ProbeCompilation
 from .plugins import Probe
 from .utility import Singleton, get_logger
@@ -111,8 +111,9 @@ class Controller(metaclass=Singleton):
         atexit.register(lambda: Controller().__del__()
                         if Controller() else None)
         self.__compiler: EbpfCompiler = EbpfCompiler(
-            log_level=log_level, packet_cp_callback=lambda: Controller()._packet_cp_callback,
-            log_cp_callback=lambda: Controller._log_cp_callback)
+            log_level=log_level,
+            packet_cp_callback=lambda x, y, z: Controller()._packet_cp_callback(x, y, z),
+            log_cp_callback=lambda x, y, z: Controller()._log_cp_callback(x, y, z))
 
     def __del__(self):
         """Method to clear all the deployed resources."""
@@ -124,13 +125,8 @@ class Controller(metaclass=Singleton):
             self.__observer.stop()
             self.__observer.join()
             self.__observer = None
-        with self.__probes_lock:
-            for k in list(self.__probes.keys()):
-                for kk in list(self.__probes[k].keys()):
-                    Controller._logger.info(
-                        "Deleting Probe {} of Plugin {}".format(kk, k))
-                    self.delete_probe(k, kk)
         self.__compiler.__del__()
+        del self.__probes
 
     def _packet_cp_callback(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
         """Method to forward the packet received from the data plane to the
@@ -245,7 +241,9 @@ class Controller(metaclass=Singleton):
         with Controller._plugins_lock:
             plugin = Controller.get_plugin(plugin_name)
             cls = getattr(plugin, plugin_name.capitalize(), None)
-            if not cls or not issubclass(cls, Probe) or not dataclasses.is_dataclass(cls):
+            if not cls or not issubclass(cls, Probe) or not dataclasses.is_dataclass(cls)\
+                    or not any(x in ["ebpf.c", "ingress.c", "egress.c"] or '.c' in x for x in
+                               os.listdir(os.path.join(os.path.dirname(__file__), "plugins", plugin_name))):
                 Controller.delete_plugin(plugin_name)
                 raise exceptions.InvalidPluginException(
                     "Plugin {} is not valid".format(plugin_name))
@@ -271,50 +269,60 @@ class Controller(metaclass=Singleton):
             return import_module("{}.plugins.{}".format(__package__, plugin_name))
 
     @staticmethod
+    def __download_from_remote_git(dest_path: str, plugin_name: str, git_url: str = None):
+        if not git_url:
+            git_url = "{}/{}.git".format(base_url, plugin_name)
+        os.system("""
+            git init {dest_path};
+            cd {dest_path};
+            git remote add origin {git_url};
+            git config core.sparsecheckout true;
+            echo "{plugin_name}/*" > .git/info/sparse-checkout;
+            git pull origin master;
+            rm -rf .git;
+            """.format(dest_path=dest_path, git_url=git_url, plugin_name=plugin_name))
+
+    @staticmethod
     def create_plugin(variable: str, update: bool = False):
         """Static method to create a plugin. Different types are supported:
         1. local directory: path to a local plugin directory;
         2. remote custom: URL to the remote repository containing the plugin to pull;
-        3. remote default: the plugin is pulled from the default dechainy_plugins repo.
+        3. remote default: the plugin is pulled from the default dechainy_plugin_<name> repo.
 
         Raises:
             exceptions.UnknownPluginFormatException: When none of the above formats is provided.
         """
         with Controller._plugins_lock:
             dest_path = os.path.join(os.path.dirname(__file__), "plugins")
-
-            if os.path.isdir(variable):  # take from local path
-                plugin_name = os.path.basename(variable)
-                Controller.__check_plugin_exists(
-                    plugin_name, is_creating=True, update=update)
-                shutil.copytree(variable, os.path.join(dest_path, plugin_name))
-            # download from remote custom
-            elif any(variable.startswith(s) for s in ['http:', 'https:']):
-                if not variable.endswith(".git"):
-                    raise Exception(
-                        "Not git repo, download the plugin and install it by your own please")
-                plugin_name = variable.split("/")[-1][:-4]
-                Controller.__check_plugin_exists(
-                    plugin_name, is_creating=True, update=update)
-                os.system("git clone {} {}".format(
-                    variable, os.path.join(dest_path, plugin_name)))
-            # download from remote default
-            elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
-                plugin_name = variable
-                Controller.__check_plugin_exists(
-                    plugin_name, is_creating=True, update=update)
-                os.system("""
-                    git init {};
-                    cd {};
-                    git remote add origin {};
-                    git config core.sparsecheckout true;
-                    echo "{}/*" > .git/info/sparse-checkout;
-                    git pull origin master;
-                    rm -rf .git
-                    """.format(dest_path, dest_path, plugins_url, plugin_name))
-            else:
-                raise exceptions.UnknownPluginFormatException(
-                    "Unable to handle input {}".format(variable))
+            try:
+                if os.path.isdir(variable):  # take from local path
+                    plugin_name = os.path.basename(variable)
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    shutil.copytree(variable, os.path.join(
+                        dest_path, plugin_name))
+                # download from remote custom
+                elif any(variable.startswith(s) for s in ['http:', 'https:']):
+                    if not variable.endswith(".git"):
+                        raise exceptions.UnknownPluginFormatException(
+                            "Not git repo, download the plugin and install it by your own please")
+                    plugin_name = variable.split("/")[-1][:-4]
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    Controller.__download_from_remote_git(
+                        dest_path=dest_path, plugin_name=plugin_name, git_url=variable)
+                # download from remote default
+                elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
+                    plugin_name = variable
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    Controller.__download_from_remote_git(
+                        dest_path=dest_path, plugin_name=plugin_name)
+                else:
+                    raise exceptions.UnknownPluginFormatException(
+                        "Unable to handle input {}".format(variable))
+            except Exception as e:
+                raise exceptions.UnknownPluginFormatException(e)
             Controller.check_plugin_validity(plugin_name)
         Controller._logger.info("Created Plugin {}".format(plugin_name))
 

@@ -66,3 +66,8 @@ class NoCodeProbeException(Exception):
 class MetricUnspecifiedException(Exception):
     """Exception to be thrown when requiring a specific metric not specified in the Adaptmon code"""
     pass
+
+
+class ProgramInChainNotFoundException(Exception):
+    """Exception to be thrown when the specified program has not been fond in the chain"""
+    pass

@@ -53,4 +53,4 @@ RUN \
   apt clean && \
   apt autoremove
 
-ENTRYPOINT ["python3", "-W ignore"]
+CMD ["python3", "-W ignore"]

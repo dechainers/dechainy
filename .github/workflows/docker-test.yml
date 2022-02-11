@@ -23,4 +23,4 @@ jobs:
           -v /lib/modules:/lib/modules:ro \
           -v /etc/localtime:/etc/localtime:ro \
           -v /usr/src:/usr/src:ro \
-          s41m0n/dechainy:test pytest
+          s41m0n/dechainy:test pytest --disable-warnings

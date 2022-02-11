@@ -77,7 +77,7 @@ RUN \
   apt clean && \
   apt autoremove -y
 
-CMD exec python3 -W ignore -m dechainy
+CMD ["python3", "-W ignore"]
 
 #######################
 # docker run --rm -it --privileged --network host

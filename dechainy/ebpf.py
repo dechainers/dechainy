@@ -19,11 +19,11 @@ import platform
 import threading
 import time
 from dataclasses import dataclass, field
-from re import MULTILINE, finditer
+from re import MULTILINE, finditer, sub
 from threading import RLock
-from typing import Callable, Dict, List, Tuple, Union
+from typing import Callable, ClassVar, Dict, List, Tuple, Union
 
-from bcc import BPF
+from bcc import BPF, XDPFlags
 from bcc.table import QueueStack, TableBase
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
@@ -118,6 +118,8 @@ class Program:
     flags: int
     code: str
     program_id: int
+    probe_id: int
+    plugin_id: int
     debug: bool = False
     cflags: List[str] = field(default_factory=lambda: [])
     features: Dict[str, MetricFeatures] = field(default_factory=lambda: {})
@@ -284,27 +286,24 @@ class EbpfCompiler(metaclass=Singleton):
         __is_destroyed (bool): Variable to keep track of the lifecycle of the object.
 
     """
-    __logger: logging.Logger = get_logger("EbpfCompiler")
-    __is_batch_supp: bool = None
-    __base_dir: str = os.path.join(os.path.dirname(__file__), "sourcebpf")
-    __PARENT_INGRESS_TC: str = 'ffff:fff2'
-    __PARENT_EGRESS_TC: str = 'ffff:fff3'
-    __XDP_MAP_SUFFIX: str = 'xdp'
-    __TC_MAP_SUFFIX: str = 'tc'
+    __logger: ClassVar[logging.Logger] = get_logger("EbpfCompiler")
+    __is_batch_supp: ClassVar[bool] = None
+    __base_dir: ClassVar[str] = os.path.join(
+        os.path.dirname(__file__), "sourcebpf")
+    __PARENT_INGRESS_TC: ClassVar[str] = 'ffff:fff2'
+    __PARENT_EGRESS_TC: ClassVar[str] = 'ffff:fff3'
+    __XDP_MAP_SUFFIX: ClassVar[str] = 'xdp'
+    __TC_MAP_SUFFIX: ClassVar[str] = 'tc'
+    __EPOCH_BASE: ClassVar[int] = int((time.time() - time.monotonic()) * 10**9)
 
-    # Computing EPOCH BASE time from uptime, to synchronize bpf_ktime_get_ns()
-    with open(os.path.join(os.sep, "proc", "uptime"), 'r') as f:
-        __EPOCH_BASE: int = int(
-            (int(time.time() * 10**9) - int(float(f.readline().split()[0]) * (10 ** 9))))
-
-    __TC_CFLAGS: List[str] = [
+    __TC_CFLAGS: ClassVar[List[str]] = [
         f'-DCTXTYPE={BPF.TC_STRUCT}',
         f'-DPASS={BPF.TC_ACT_OK}',
         f'-DDROP={BPF.TC_ACT_SHOT}',
         f'-DREDIRECT={BPF.TC_REDIRECT}',
         '-DXDP=0']
 
-    __XDP_CFLAGS: List[str] = [
+    __XDP_CFLAGS: ClassVar[List[str]] = [
         f'-DCTXTYPE={BPF.XDP_STRUCT}',
         f'-DBACK_TX={BPF.XDP_TX}',
         f'-DPASS={BPF.XDP_PASS}',
@@ -312,7 +311,7 @@ class EbpfCompiler(metaclass=Singleton):
         f'-DREDIRECT={BPF.XDP_REDIRECT}',
         '-DXDP=1']
 
-    __DEFAULT_CFLAGS: List[str] = [
+    __DEFAULT_CFLAGS: ClassVar[List[str]] = [
         "-w",
         f'-DMAX_PROGRAMS_PER_HOOK={BPF._MAX_PROGRAMS_PER_HOOK}',
         f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x}={y}' for x, y in logging._nameToLevel.items()]
@@ -413,8 +412,11 @@ class EbpfCompiler(metaclass=Singleton):
             'Compiling Pivot for Interface {} Type {} Mode {}'.format(interface, program_type, mode_map_name))
 
         # Compiling the eBPF program
-        p = Program(interface=interface, idx=idx, mode=mode, code=pivoting_code, cflags=EbpfCompiler.__formatted_cflags(
-            mode, program_type), debug=False, flags=flags, program_id=0, offload_device=offload_device)
+        p = Program(interface=interface, idx=idx, mode=mode, code=pivoting_code,
+                    cflags=EbpfCompiler.__formatted_cflags(mode, program_type),
+                    probe_id=-1, plugin_id=-1, debug=False, flags=flags,
+                    program_id=0, offload_device=offload_device)
+
         target = getattr(
             self.__interfaces_programs[idx], f'{program_type}_{mode_map_name}')
         with target.lock:
@@ -486,6 +488,81 @@ class EbpfCompiler(metaclass=Singleton):
             target.programs[index].__del__()
             del target.programs[index]
 
+    def patch_hook(self, program_type: str, old_program: Union[Program, SwapStateCompile],
+                   new_code: str, new_cflags: List[str], log_level: int = logging.INFO):
+        """Method to patch a specific provided program belonging to a certain hook.
+        After compiling the new program, if no error are arisen, the old program will be
+        completely deleted and substituting with the new one, preserving its position
+        in the program chain.
+
+        Args:
+            program_type (str): The type of the hook (ingress/egress).
+            old_program (Union[Program, SwapStateCompile]): The old program to be replaced.
+            new_code (str): The new source code to be compiled.
+            new_cflags (List[str]): The new cflags to be used.
+            log_level (int, optional): The log level of the program. Defaults to logging.INFO.
+
+        Raises:
+            exceptions.UnknownInterfaceException: When the provided program belongs to an
+                unknown interface.
+            exceptions.ProgramInChainNotFoundException: When the provided program has not
+                been found in the chain.
+        """
+        if old_program.idx not in self.__interfaces_programs:
+            raise exceptions.UnknownInterfaceException(
+                "Interface with index {} unknown.".format(old_program.idx))
+
+        mode_map_name = EbpfCompiler.__XDP_MAP_SUFFIX if old_program.mode == BPF.XDP else EbpfCompiler.__TC_MAP_SUFFIX
+        program_chain = getattr(
+            self.__interfaces_programs[old_program.idx], f'{program_type}_{mode_map_name}')
+        with program_chain.lock:
+            index = program_chain.programs.index(old_program)
+
+            if not index:
+                raise exceptions.ProgramInChainNotFoundException(
+                    "Program {} not found in the chain".format(old_program.program_id))
+
+            EbpfCompiler.__logger.info(
+                'Patching Program {} Interface {} Type {} Mode {}'.format(old_program.program_id,
+                                                                          old_program.interface,
+                                                                          program_type,
+                                                                          mode_map_name))
+
+            cflags = new_cflags + EbpfCompiler.__formatted_cflags(old_program.mode, program_type,
+                                                                  old_program.program_id, old_program.plugin_id,
+                                                                  old_program.probe_id, log_level)
+
+            original_code, swap_code, features = EbpfCompiler.__precompile_parse(
+                EbpfCompiler.__format_for_hook(
+                    old_program.mode, program_type, EbpfCompiler.__format_helpers(new_code)),
+                cflags)
+
+            # Loading compiled "internal_handler" function and set the previous
+            # plugin program to call in the CHAIN to the current function descriptor
+            ret = Program(interface=old_program.interface, idx=old_program.idx, mode=old_program.mode,
+                          flags=old_program.flags, offload_device=old_program.offload_device,
+                          cflags=cflags, debug=old_program.debug, code=original_code,
+                          program_id=old_program.program_id, plugin_id=old_program.plugin_id,
+                          probe_id=old_program.probe_id, features=features)
+
+            # Updating Service Chain
+            program_chain.programs[0][f'{program_type}_next_{mode_map_name}'][
+                program_chain.programs[index-1].program_id] = ct.c_int(ret.f.fd)
+
+            # Compiling swap program if needed
+            if swap_code:
+                EbpfCompiler.__logger.info('Compiling Also Swap Code')
+                p1 = Program(interface=old_program.interface, idx=old_program.idx, mode=old_program.mode,
+                             flags=old_program.flags, code=swap_code, debug=old_program.debug,
+                             cflags=cflags, offload_device=old_program.offload_device,
+                             program_id=old_program.program_id, plugin_id=old_program.plugin_id,
+                             probe_id=old_program.probe_id, features=features)
+                ret = SwapStateCompile(
+                    [ret, p1], program_chain.programs[0][f'{program_type}_next_{mode_map_name}'])
+            # Append the main program to the list of programs
+            program_chain.programs[index] = ret
+            old_program.__del__()
+
     def compile_hook(self, program_type: str,
                      code: str, interface: str,
                      mode: int, flags: int,
@@ -545,16 +622,17 @@ class EbpfCompiler(metaclass=Singleton):
             EbpfCompiler.__logger.info(
                 'Compiling Program {} Interface {} Type {} Mode {}'.format(program_id, interface, program_type, mode_map_name))
 
-            original_code, swap_code, features = EbpfCompiler.__precompile_parse(
-                EbpfCompiler.__format_for_hook(mode, program_type, EbpfCompiler.__format_helpers(code)))
-
             cflags = cflags + EbpfCompiler.__formatted_cflags(
-                mode, program_type, program_id, plugin_id, probe_id, log_level)
+                mode, program_type, program_id, plugin_id, probe_id, log_level) + ["-DTEST_EXPORT=1"]
+
+            original_code, swap_code, features = EbpfCompiler.__precompile_parse(
+                EbpfCompiler.__format_for_hook(mode, program_type, EbpfCompiler.__format_helpers(code)), cflags)
 
             # Loading compiled "internal_handler" function and set the previous
             # plugin program to call in the CHAIN to the current function descriptor
             ret = Program(interface=interface, idx=idx, mode=mode, flags=flags, offload_device=offload_device,
-                          cflags=cflags, debug=debug, code=original_code, program_id=program_id, features=features)
+                          cflags=cflags, debug=debug, code=original_code, program_id=program_id,
+                          plugin_id=plugin_id, probe_id=probe_id, features=features)
 
             # Updating Service Chain
             program_chain.programs[0][f'{program_type}_next_{mode_map_name}'][
@@ -564,7 +642,8 @@ class EbpfCompiler(metaclass=Singleton):
             if swap_code:
                 EbpfCompiler.__logger.info('Compiling Also Swap Code')
                 p1 = Program(interface=interface, idx=idx, mode=mode, flags=flags, code=swap_code, debug=debug,
-                             cflags=cflags, offload_device=offload_device, program_id=program_id, features=features)
+                             cflags=cflags, offload_device=offload_device, program_id=program_id,
+                             plugin_id=plugin_id, probe_id=probe_id, features=features)
                 ret = SwapStateCompile(
                     [ret, p1], program_chain.programs[0][f'{program_type}_next_{mode_map_name}'])
             # Append the main program to the list of programs
@@ -615,14 +694,15 @@ class EbpfCompiler(metaclass=Singleton):
             return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_EGRESS_TC
         if mode == BPF.SCHED_CLS:
             return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_INGRESS_TC
-        return BPF.XDP, flags, interface if flags == (1 << 3) else None, EbpfCompiler.__XDP_MAP_SUFFIX, None
+        return BPF.XDP, flags, interface if flags == XDPFlags.HW_MODE else None, EbpfCompiler.__XDP_MAP_SUFFIX, None
 
     @staticmethod
-    def __precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeatures]]:
+    def __precompile_parse(original_code: str, cflags: List[str]) -> Tuple[str, str, Dict[str, MetricFeatures]]:
         """Static method to compile additional functionalities from original code (swap, erase, and more)
 
         Args:
             original_code (str): The original code to be controlled.
+            cflags (List[str]): The list of cflags to be applied.
 
         Returns:
             Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps,
@@ -630,16 +710,36 @@ class EbpfCompiler(metaclass=Singleton):
         """
         # Find map declarations, from the end to the beginning
         declarations = [(m.start(), m.end(), m.group()) for m in finditer(
-            r"^(BPF_TABLE|BPF_QUEUESTACK|BPF_PERF).*$", original_code, MULTILINE)]
+            r"^(BPF_TABLE|BPF_QUEUESTACK|BPF_PERF).*$", original_code, flags=MULTILINE)]
         declarations.reverse()
 
-        # Check if at least one map needs swap
-        need_swap = any(x for _, _, x in declarations if "__attributes__" in x and "SWAP" in x.split(
-            "__attributes__")[1])
-        cloned_code = original_code if need_swap else None
+        if not any(x for _, _, x in declarations if "__attributes__" in x):
+            return original_code, None, {}
 
+        tmp_code = sub("__attributes__.*", ";", original_code, flags=MULTILINE)
+        b = BPF(text=tmp_code, cflags=cflags)
+
+        # Check if at least one map needs swap
+        need_swap = False
+        active_declarations = []
         maps = {}
+
         for start, end, declaration in declarations:
+            splitted = declaration.split(',')
+            map_name = splitted[1].split(")")[0].strip() if (
+                "BPF_Q" in declaration or "BPF_P" in declaration) else splitted[3].split(")")[0].strip()
+            try:
+                b[map_name]
+            except Exception:
+                continue
+
+            active_declarations.append((start, end, declaration))
+            if "__attributes__" in declaration and "SWAP" in declaration:
+                need_swap = True
+        del b
+
+        cloned_code = original_code if need_swap else None
+        for start, end, declaration in active_declarations:
             new_decl, splitted = declaration, declaration.split(',')
             map_name = splitted[1].split(")")[0].strip() if (
                 "BPF_Q" in declaration or "BPF_P" in declaration) else splitted[3].split(")")[0].strip()
@@ -715,7 +815,7 @@ class EbpfCompiler(metaclass=Singleton):
         # Removing C-like comments
         code = remove_c_comments(code)
 
-        declarations = [(m.start(), m.end(), m.group()) for m in finditer(
+        declarations = [(m.start(), m.end(), m.group(1)) for m in finditer(
             r"return REDIRECT\((.*)\);.*$", code, MULTILINE)]
         declarations.reverse()
 

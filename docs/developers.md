@@ -13,7 +13,8 @@ This section tries to point out most of the best practises and tricks that inter
 Many components can be enhanced or created within this framework. The fundamental rules are:
 
 - do not repeat: before submitting a functionality, please make sure that it has not already been included in previous commits;
-- new Plugins can be easily created, by extending the Plugin class, creating the apposite needed methods, the eBPF code, and the list of routes to interact with, if needed;
+- to submit new plugins, please make sure they are compliant with the requirements (for example, refer to the [dechainy_plugin_firewall](https://github.com/dechainers/dechainy_plugin_firewall);
+- to submit REST functionalities, please refer to the [dechainy_web](https://github.com/dechainers/dechainy_web) repository;
 - personalized control plane code is not safe to be executed, thus if you plan to use it in a real scenario please consider all the possible vulnerabilities/exploitations;
 - keep the source files as separated as possible, avoiding mixing functionalities that affects different component in the same file.
 
@@ -67,5 +68,5 @@ docker run --rm --privileged --network host \
           -v /lib/modules:/lib/modules:ro \
           -v /etc/localtime:/etc/localtime:ro \
           -v /usr/src:/usr/src:ro \
-          s41m0n/dechainy:test bash -c "flake8 . --count --exit-zero --max-complexity=13 --max-line-length=127 --statistics && pytest"
+          s41m0n/dechainy:test bash -c "flake8 . --count --exit-zero --max-line-length=127 --statistics && pytest"
 ```

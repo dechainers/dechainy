@@ -18,6 +18,7 @@ from ctypes import Array
 from dataclasses import dataclass, field
 from typing import List, Union
 
+from bcc import XDPFlags
 from bcc.table import ArrayBase, QueueStack, TableBase
 
 from ..ebpf import (BPF, EbpfCompiler, Metadata, MetricFeatures,
@@ -52,7 +53,8 @@ class Probe:
     Attributes:
         name (str): The name of the Probe.
         interface (str): The interface to which attach the programs.
-        mode (Union[str, int]): The mode of inserting the programs (TC, XDP, XDP_DRV). Default to TC.
+        mode (int): The mode of inserting the programs. Default to BPF.SCHED_CLS.
+        flags (int): The flags to be used if BPF.XDP mode. Default to XDPFlags.SKB_MODE.
         ingress (HookSetting): The configuration of the ingress hook. Default to HookSetting().
         ingress (HookSetting): The configuration of the egress hook. Default to HookSetting().
         extra (dict): The dictionary containing extra information to be used. Default to {}.
@@ -67,7 +69,8 @@ class Probe:
     """
     name: str
     interface: str
-    mode: Union[str, int] = 'TC'
+    mode: int = BPF.SCHED_CLS
+    flags: int = XDPFlags.SKB_MODE
     ingress: HookSetting = HookSetting()
     egress: HookSetting = HookSetting()
     extra: dict = field(default_factory=lambda: {})
@@ -75,19 +78,6 @@ class Probe:
     log_level: Union[str, int] = logging.INFO
 
     def __post_init__(self, path=__file__):
-        if self.mode == 'TC':
-            self.mode: int = BPF.SCHED_CLS
-            self.flags: int = 0
-        elif self.mode in ['XDP', 'XDP_SBK']:
-            self.mode: int = BPF.XDP
-            self.flags: int = (1 << 1)
-        elif self.mode == 'XDP_DRV':
-            self.mode: int = BPF.XDP
-            self.flags: int = (1 << 2)
-        else:
-            self.mode = BPF.XDP
-            self.flags = (1 << 3)
-
         self._is_destroyed: bool = False
         self._programs: ProbeCompilation = None
 
@@ -182,7 +172,12 @@ class Probe:
         decoded_message = message.decode()
         args = tuple([args[i] for i in range(0, decoded_message.count('%'))])
         formatted = decoded_message % args
-        self._logger.log(log_level, f'Message from CPU={cpu}: {formatted}')
+        self._logger.log(log_level, 'Message from CPU={}, Hook={}, Mode={}: {}'.format(
+            cpu,
+            "ingress" if metadata.ingress else "egress",
+            "xdp" if metadata.xdp else "TC",
+            formatted
+        ))
 
     def __do_retrieve_metric(map_ref: Union[QueueStack, TableBase], features: List[MetricFeatures]) -> any:
         """Method internally used to retrieve data from the underlying eBPF map.
