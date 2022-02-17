@@ -14,17 +14,16 @@
 import ctypes as ct
 import logging
 import os
-from ctypes import Array
+import weakref
 from dataclasses import dataclass, field
-from typing import List, Union
+from typing import List, Type, Union
 
 from bcc import XDPFlags
 from bcc.table import ArrayBase, QueueStack, TableBase
 
-from ..ebpf import (BPF, EbpfCompiler, Metadata, MetricFeatures,
-                    ProbeCompilation, Program, SwapStateCompile)
+from ..ebpf import BPF, EbpfCompiler, MetricFeatures, Program, SwapStateCompile
 from ..exceptions import (HookDisabledException, MetricUnspecifiedException,
-                          NoCodeProbeException)
+                          NoCodeProbeException, ProbeNotFoundException)
 from ..utility import ctype_to_normal, get_logger
 
 
@@ -40,9 +39,7 @@ class HookSetting:
     required: bool = False
     cflags: List[str] = field(default_factory=lambda: [])
     code: str = None
-
-    def __post_init__(self):
-        self.code = None
+    program_ref: Type[weakref.ReferenceType] = lambda: None
 
 
 @dataclass
@@ -61,8 +58,6 @@ class Probe:
         debug (bool): True if the programs should be compiled in debug mode. Default to False.
         log_level (Union[str, int]): The level of logging to be used. Default to logging.INFO.
         flags (int): Flags used to inject eBPF program when in XDP mode, later inferred. Default to 0.
-        _is_destroyed (bool): Variable to keep track of the probe lifecycle.
-        _programs (ProbeCompilation): The compiled eBPF programs.
         _logger (logging.Logger): The probe logger.
     Raises:
         NoCodeProbeException: When the probe does not have either ingress nor egress code.
@@ -71,16 +66,13 @@ class Probe:
     interface: str
     mode: int = BPF.SCHED_CLS
     flags: int = XDPFlags.SKB_MODE
-    ingress: HookSetting = HookSetting()
-    egress: HookSetting = HookSetting()
+    ingress: HookSetting = field(default_factory=lambda: HookSetting())
+    egress: HookSetting = field(default_factory=lambda: HookSetting())
     extra: dict = field(default_factory=lambda: {})
     debug: bool = False
     log_level: Union[str, int] = logging.INFO
 
     def __post_init__(self, path=__file__):
-        self._is_destroyed: bool = False
-        self._programs: ProbeCompilation = None
-
         if isinstance(self.log_level, str):
             self.log_level = logging._nameToLevel[self.log_level]
         self._logger: logging.Logger = get_logger(
@@ -105,14 +97,9 @@ class Probe:
     def __del__(self):
         """Method to clear all resources associated to the probe, including
         eBPF program and logger."""
-        if self._is_destroyed:
-            return
-        self._is_destroyed = True
-        if self._logger and self._logger.name in self._logger.manager.loggerDict:
-            self._logger.manager.loggerDict.pop(self._logger.name)
-            del self._logger
-        if self._programs:
-            del self._programs
+        self._logger.manager.loggerDict.pop(self._logger.name)
+        del self._logger
+        print("DELEEEETINGGGGG")
 
     def __getitem__(self, key: str) -> Union[str, Program]:
         """Method to access directly Programs in the class
@@ -123,7 +110,7 @@ class Probe:
         Returns:
             Union[str, Program]: the compiled Program
         """
-        return getattr(self._programs, key) if not self._is_destroyed else exit(1)
+        return getattr(self, key).program_ref()
 
     @property
     def plugin_name(self) -> str:
@@ -134,17 +121,14 @@ class Probe:
         """
         return self.__class__.__name__.lower()
 
-    def post_compilation(self, comp: ProbeCompilation):
+    def post_compilation(self):
         """Method to be called after eBPF programs associated to the probes
-        are compiled and needs to be associated to this instance.
-        Additional functionalities can be implemented in derived Probe classes.
-
-        Args:
-            comp (ProbeCompilation): The result of the compilation.
+        are compiled. Additional functionalities can be implemented in derived
+        Probe classes.
         """
-        self._programs = comp
+        pass
 
-    def handle_packet_cp(self, metadata: Metadata, data: Array, cpu: int):
+    def handle_packet_cp(self, event: Type[ct.Structure], cpu: int):
         """Method to handle a packet received from the apposite data plane code
         and forwarded from the Controller. Probes that wants to send packets
         to the userspace must override and implement this method
@@ -158,7 +142,7 @@ class Probe:
         """
         self._logger.info(f'Received Packet to handle from CPU {cpu}')
 
-    def log_message(self, metadata: Metadata, log_level: int, message: Array, args: Array, cpu: int):
+    def log_message(self, event: Type[ct.Structure], cpu: int):
         """Method to log a message received from the apposite data plane code and
         forwarded from the Controller.
 
@@ -169,13 +153,14 @@ class Probe:
             args (ct.Array): The list of arguments used to format the message.
             cpu (int): The number of the CPU handling the message.
         """
-        decoded_message = message.decode()
-        args = tuple([args[i] for i in range(0, decoded_message.count('%'))])
+        decoded_message = event.message.decode()
+        args = tuple([event.args[i]
+                      for i in range(0, decoded_message.count('%'))])
         formatted = decoded_message % args
-        self._logger.log(log_level, 'Message from CPU={}, Hook={}, Mode={}: {}'.format(
+        self._logger.log(event.level, 'Message from CPU={}, Hook={}, Mode={}: {}'.format(
             cpu,
-            "ingress" if metadata.ingress else "egress",
-            "xdp" if metadata.xdp else "TC",
+            "ingress" if event.metadata.ingress else "egress",
+            "xdp" if event.metadata.xdp else "TC",
             formatted
         ))
 

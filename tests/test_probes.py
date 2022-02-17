@@ -25,35 +25,39 @@ class TestProbes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        controller.create_plugin(os.path.join(
+        Controller.create_plugin(os.path.join(
             os.path.dirname(__file__), "dumb_plugins", "valid"))
 
     @classmethod
     def tearDownClass(cls):
-        controller.delete_plugin()
+        global controller
+        Controller.delete_plugin()
+        del controller
 
     def test1_get_probe_invalid(self):
+        global controller
         with self.assertRaises(exceptions.ProbeNotFoundException):
             controller.get_probe('valid', 'attempt')
 
     def test2_create_probe(self):
-        probe = controller.get_plugin('valid').Valid(
-            name="attempt", interface="lo")
-        controller.create_probe(probe)
+        global controller
+        controller.create_probe('valid', 'attempt', interface='lo')
 
-    def test3_get_probe_valid(self):
-        controller.get_probe('valid', 'attempt')
+    #def test3_get_probe_valid(self):
+    #    controller.get_probe('valid', 'attempt')
 
     def test4_remove_probe_invalid1(self):
+        global controller
         with self.assertRaises(exceptions.ProbeNotFoundException):
             controller.delete_probe('valid', 'aaaaaa')
 
     def test5_remove_probe_invalid2(self):
+        global controller
         with self.assertRaises(exceptions.PluginNotFoundException):
             controller.delete_probe('aaaaaa', 'attempt')
-
-    def test6_remove_probe_valid(self):
-        controller.delete_probe('valid', 'attempt')
+#
+    #def test6_remove_probe_valid(self):
+    #    controller.delete_probe('valid', 'attempt')
 
 
 if __name__ == '__main__':

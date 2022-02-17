@@ -134,7 +134,7 @@ struct lpm_key {
 // Struct for logging packets
 #define LOG_STRUCT(_level, _msg, ...)                 \
   struct __attribute__((__packed__)) LogMsg {         \
-    struct pkt_metadata md;                           \
+    struct pkt_metadata metadata;                     \
     uint64_t level;                                   \
     uint64_t args[4];                                 \
     char message[sizeof(_msg)];                       \

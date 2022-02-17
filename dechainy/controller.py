@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import atexit
 import ctypes as ct
 import dataclasses
 import itertools
@@ -27,8 +26,8 @@ from watchdog.events import (DirCreatedEvent, DirDeletedEvent, FileSystemEvent,
                              FileSystemEventHandler)
 from watchdog.observers import Observer
 
-from . import exceptions, base_url
-from .ebpf import EbpfCompiler, Metadata, ProbeCompilation
+from . import base_url, exceptions
+from .ebpf import EbpfCompiler
 from .plugins import Probe
 from .utility import Singleton, get_logger
 
@@ -91,7 +90,6 @@ class Controller(metaclass=Singleton):
     Attributes:
         __probes (Dict[str, Dict[str, Type[Probe]]]): A dictionary containing, for each plugin,
             an inner dictionary holding the dictionary of the current deployed probes.
-        __is_destroyed (bool): Variable to keep track of the instance lifecycle.
         __observer (Observer): Watchdog thread to keep this instance synchronised with
             the plugin directory.
         __compiler (EbpfCompiler): The eBPF programs compiler.
@@ -103,13 +101,11 @@ class Controller(metaclass=Singleton):
         Controller._logger.setLevel(log_level)
         self.__probes_lock: RLock = RLock()
         self.__probes: OrderedDict[str, Dict[str, Probe]] = {}
-        self.__is_destroyed: bool = False
         self.__observer = Observer()
         self.__observer.schedule(SyncPluginsHandler(), os.path.join(
             os.path.dirname(__file__), "plugins"), recursive=True)
+        self.__observer.daemon = True
         self.__observer.start()
-        atexit.register(lambda: Controller().__del__()
-                        if Controller() else None)
         self.__compiler: EbpfCompiler = EbpfCompiler(
             log_level=log_level,
             packet_cp_callback=lambda x, y, z: Controller()._packet_cp_callback(x, y, z),
@@ -117,80 +113,52 @@ class Controller(metaclass=Singleton):
 
     def __del__(self):
         """Method to clear all the deployed resources."""
+        self.__observer.stop()
+        self.__observer.join()
+        del self.__observer
+        with self.__probes_lock:
+            del self.__probes
+        del self.__compiler
 
-        if self.__is_destroyed:
-            return
-        self.__is_destroyed = True
-        if self.__observer:
-            self.__observer.stop()
-            self.__observer.join()
-            self.__observer = None
-        self.__compiler.__del__()
-        del self.__probes
-
-    def _packet_cp_callback(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
+    def _packet_cp_callback(self, cpu: int, event: Type[ct.Structure], size: int):
         """Method to forward the packet received from the data plane to the
         apposite Probe in order to be handled.
 
         Args:
             cpu (int): The CPU which registered the packet
-            data (ct.POINTER): The raw data representing the packet
+            event (Type[ct.Structure]): The event structure automatically converted
             size (int): The size of the entire metadata and packet
         """
-
-        class Packet(ct.Structure):
-            """Class representing a packet forwarded from the data plane
-            to the control plane.
-
-            Attributes:
-                metadata (Metadata): The metadata associated to the message.
-                raw (c_ubyte array): The raw data as byte array.
-            """
-            _fields_ = [("metadata", Metadata),
-                        ("raw", ct.c_ubyte * (size - ct.sizeof(Metadata)))]
-
-        skb_event = ct.cast(data, ct.POINTER(Packet)).contents
-        plugin_name = next(itertools.islice(
-            self.__probes.keys(), skb_event.metadata.plugin_id, None))
-        probe_name = next(itertools.islice(
-            self.__probes[plugin_name].keys(), skb_event.metadata.probe_id, None))
-        self.__probes[plugin_name][probe_name].handle_packet_cp(
-            skb_event.metadata, skb_event.raw, cpu)
+        try:
+            plugin_name = next(itertools.islice(
+                self.__probes.keys(), event.metadata.plugin_id, None))
+            probe_name = next(itertools.islice(
+                self.__probes[plugin_name].keys(), event.metadata.probe_id, None))
+        except Exception:
+            return
+        self.__probes[plugin_name][probe_name].handle_packet_cp(event, cpu)
 
     def _log_cp_callback(self,
                          cpu: int,
-                         data: ct.POINTER(ct.c_void_p),
+                         msg_struct: ct.Structure,
                          size: int):
         """Method to forward the message received from the data plane
         to the apposite Probe in order to be logged.
 
         Args:
             cpu (int): The CPU which has registered the message.
-            data (ct.POINTER): The raw structure of the message.
+            msg_struct (ct.Structure): The converted structure according to
+                the one declared in ebpf.py and helpers.h
             size (int): The size of the entire message.
         """
-
-        class LogMessage(ct.Structure):
-            """Inner LogMessage class, representing the entire data structure
-
-            Attributes:
-                metadata (Metadata): The metadata of the message
-                level (c_uint64): The log level of the message
-                args (c_uint64 array): Array of maximum 4 variables to format the string
-                content (c_char array): The message string to log
-            """
-            _fields_ = [("metadata", Metadata),
-                        ("level", ct.c_uint64),
-                        ("args", ct.c_uint64 * 4),
-                        ("message", ct.c_char * (size - (ct.sizeof(ct.c_uint16) * 4) - (ct.sizeof(ct.c_uint64) * 4)))]
-
-        skb_event = ct.cast(data, ct.POINTER(LogMessage)).contents
-        plugin_name = next(itertools.islice(
-            self.__probes.keys(), skb_event.metadata.plugin_id, None))
-        probe_name = next(itertools.islice(
-            self.__probes[plugin_name].keys(), skb_event.metadata.probe_id, None))
-        self.__probes[plugin_name][probe_name].log_message(
-            skb_event.metadata, skb_event.level, skb_event.message, skb_event.args, cpu)
+        try:
+            plugin_name = next(itertools.islice(
+                self.__probes.keys(), msg_struct.metadata.plugin_id, None))
+            probe_name = next(itertools.islice(
+                self.__probes[plugin_name].keys(), msg_struct.metadata.probe_id, None))
+        except Exception:
+            return
+        self.__probes[plugin_name][probe_name].log_message(msg_struct, cpu)
 
     #####################################################################
     # ---------------- Function to manage plugins --------------------- #
@@ -294,35 +262,41 @@ class Controller(metaclass=Singleton):
         """
         with Controller._plugins_lock:
             dest_path = os.path.join(os.path.dirname(__file__), "plugins")
-            try:
-                if os.path.isdir(variable):  # take from local path
-                    plugin_name = os.path.basename(variable)
-                    Controller.__check_plugin_exists(
-                        plugin_name, is_creating=True, update=update)
+            if os.path.isdir(variable):  # take from local path
+                plugin_name = os.path.basename(variable)
+                Controller.__check_plugin_exists(
+                    plugin_name, is_creating=True, update=update)
+                try:
                     shutil.copytree(variable, os.path.join(
                         dest_path, plugin_name))
-                # download from remote custom
-                elif any(variable.startswith(s) for s in ['http:', 'https:']):
-                    if not variable.endswith(".git"):
-                        raise exceptions.UnknownPluginFormatException(
-                            "Not git repo, download the plugin and install it by your own please")
-                    plugin_name = variable.split("/")[-1][:-4]
-                    Controller.__check_plugin_exists(
-                        plugin_name, is_creating=True, update=update)
+                except Exception as e:
+                    raise exceptions.UnknownPluginFormatException(e)
+            # download from remote custom
+            elif any(variable.startswith(s) for s in ['http:', 'https:']):
+                if not variable.endswith(".git"):
+                    raise exceptions.UnknownPluginFormatException(
+                        "Not git repo, download the plugin and install it by your own please")
+                plugin_name = variable.split("/")[-1][:-4]
+                Controller.__check_plugin_exists(
+                    plugin_name, is_creating=True, update=update)
+                try:
                     Controller.__download_from_remote_git(
                         dest_path=dest_path, plugin_name=plugin_name, git_url=variable)
-                # download from remote default
-                elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
-                    plugin_name = variable
-                    Controller.__check_plugin_exists(
-                        plugin_name, is_creating=True, update=update)
+                except Exception as e:
+                    raise exceptions.UnknownPluginFormatException(e)
+            # download from remote default
+            elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
+                plugin_name = variable
+                Controller.__check_plugin_exists(
+                    plugin_name, is_creating=True, update=update)
+                try:
                     Controller.__download_from_remote_git(
                         dest_path=dest_path, plugin_name=plugin_name)
-                else:
-                    raise exceptions.UnknownPluginFormatException(
-                        "Unable to handle input {}".format(variable))
-            except Exception as e:
-                raise exceptions.UnknownPluginFormatException(e)
+                except Exception as e:
+                    raise exceptions.UnknownPluginFormatException(e)
+            else:
+                raise exceptions.UnknownPluginFormatException(
+                    "Unable to handle input {}".format(variable))
             Controller.check_plugin_validity(plugin_name)
         Controller._logger.info("Created Plugin {}".format(plugin_name))
 
@@ -352,6 +326,7 @@ class Controller(metaclass=Singleton):
     # ------------------ Function to manage probes -------------------- #
     #####################################################################
 
+    # TODO: FIX
     def delete_probe(self, plugin_name: str = None, probe_name: str = None):
         """Method to delete probes. If the plugin name is not specified, then
         all the probes deployed are deleted. Otherwise, all the probes belonging
@@ -367,7 +342,6 @@ class Controller(metaclass=Singleton):
             exceptions.PluginNotFoundException: When the plugin does not exist.
         """
         with self.__probes_lock:
-            target = []
             if not plugin_name:
                 target = [p for v in self.__probes.values()
                           for p in v.values()]
@@ -379,20 +353,21 @@ class Controller(metaclass=Singleton):
             if not target:
                 raise exceptions.ProbeNotFoundException("No probes to delete")
             for probe in target:
-                if probe._programs.ingress:
-                    self.__compiler.remove_hook(
-                        "ingress", probe._programs.ingress)
-                if probe._programs.egress:
-                    self.__compiler.remove_hook(
-                        "egress", probe._programs.egress)
+                obj = probe.ingress.program_ref()
+                if obj:
+                    self.__compiler.remove_hook("ingress", obj)
+                    del obj
+                obj = probe.egress.program_ref()
+                if obj:
+                    self.__compiler.remove_hook("egress", obj)
+                    del obj
                 del self.__probes[probe.plugin_name][probe.name]
                 if not self.__probes[probe.plugin_name]:
                     del self.__probes[probe.plugin_name]
-                probe.__del__()
                 Controller._logger.info(
                     f'Successfully deleted Probe {probe.name} for Plugin {probe.plugin_name}')
 
-    def create_probe(self, probe: Probe):
+    def create_probe(self, plugin_name: str, probe_name: str, **kwargs):
         """Method to create the given probe.
 
         Args:
@@ -403,25 +378,26 @@ class Controller(metaclass=Singleton):
             exceptions.ProbeAlreadyExistsException: When a probe of the same plugin
                 and having the same name already exists.
         """
-        Controller.__check_plugin_exists(probe.plugin_name)
+        module = Controller.get_plugin(plugin_name)
         with self.__probes_lock:
-            if probe.plugin_name not in self.__probes:
-                self.__probes[probe.plugin_name] = {}
-            if probe.name in self.__probes[probe.plugin_name]:
+            if plugin_name not in self.__probes:
+                self.__probes[plugin_name] = {}
+            if probe_name in self.__probes[plugin_name]:
                 raise exceptions.ProbeAlreadyExistsException(
-                    'Probe {} for Plugin {} already exist'.format(probe.name, probe.plugin_name))
-            plugin_id = list(self.__probes.keys()).index(probe.plugin_name)
-            probe_id = len(self.__probes[probe.plugin_name])
-            comp = ProbeCompilation()
+                    'Probe {} for Plugin {} already exist'.format(probe_name, plugin_name))
+            plugin_id = list(self.__probes.keys()).index(plugin_name)
+            probe_id = len(self.__probes[plugin_name])
+            probe = getattr(module, plugin_name.capitalize())(
+                name=probe_name, **kwargs)
             for program_type in ["ingress", "egress"]:
-                code = getattr(probe, program_type).code
-                if not code:
+                probe_hook = getattr(probe, program_type)
+                if not probe_hook.code:
                     continue
-                setattr(comp, program_type, self.__compiler.compile_hook(program_type, code, probe.interface, probe.mode,
-                                                                         probe.flags, getattr(
-                                                                             probe, program_type).cflags,
-                                                                         probe.debug, plugin_id, probe_id, probe.log_level))
-            probe.post_compilation(comp)
+                probe_hook.program_ref = self.__compiler.compile_hook(
+                    program_type, probe_hook.code, probe.interface, probe.mode,
+                    probe.flags, getattr(probe, program_type).cflags,
+                    probe.debug, plugin_id, probe_id, probe.log_level)
+            probe.post_compilation()
             self.__probes[probe.plugin_name][probe.name] = probe
             Controller._logger.info(
                 f'Successfully created Probe {probe.name} for Plugin {probe.plugin_name}')

@@ -17,23 +17,22 @@ import re
 import socket
 from socket import htons, inet_aton, inet_ntoa, ntohs
 from struct import unpack
-from weakref import ref
+from weakref import WeakValueDictionary
 
 
 class Singleton(type):
     """Metatype utility class to define a Singleton Pattern
 
     Attributes:
-        _instance(object): The instance of the Singleton
+        _instances(WeakValueDictionary): The instances of the Singletons
     """
-    _instance: ref = lambda _: None
+    _instances = WeakValueDictionary()
 
     def __call__(cls, *args, **kwargs):
-        if not cls._instance():
-            ctr = super(Singleton, cls).__call__(*args, **kwargs)
-            cls._instance = ref(ctr)
-            return ctr
-        return cls._instance()
+        if cls not in cls._instances:
+            instance = super(Singleton, cls).__call__(*args, **kwargs)
+            cls._instances[cls] = instance
+        return cls._instances[cls]
 
 
 def remove_c_comments(text: str) -> str:
@@ -135,6 +134,13 @@ def port_to_host_int(port: int) -> int:
         int: the little endian representation of the port
     """
     return ntohs(port)
+
+
+def cint_type_limit(c_int_type):
+    signed = c_int_type(-1).value < c_int_type(0).value
+    bit_size = ct.sizeof(c_int_type) * 8
+    signed_limit = 2 ** (bit_size - 1)
+    return (-signed_limit, signed_limit - 1) if signed else (0, 2 * signed_limit - 1)
 
 
 def ctype_to_normal(obj: any) -> any:

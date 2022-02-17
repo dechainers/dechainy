@@ -18,6 +18,7 @@ import os
 import platform
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from re import MULTILINE, finditer, sub
 from threading import RLock
@@ -47,16 +48,12 @@ BPF._MAX_PROGRAMS_PER_HOOK = 32
 
 class Metadata(ct.Structure):
     """C struct representing the pkt_metadata structure in Data Plane programs
-
     Attributes:
         ifindex (c_uint32): The interface on which the packet was received
-        length (c_uint32): The length of the packet
-        ptype (c_uint8): The program type ingress/egress
-        probe_id (c_uint8): The ID of the probe
-        program_id (ct.c_uint16): The ID of the program
-        plugin_id (ct.c_uint16): The ID of the plugin
-        probe_id (ct.c_uint16): The ID of the probe within the plugin
+        ptype (c_uint32): The program type ingress/egress
+        probe_id (c_uint64): The ID of the probe
     """
+
     _fields_ = [("ifindex", ct.c_uint32),
                 ("length", ct.c_uint32),
                 ("ingress", ct.c_uint8),
@@ -64,17 +61,6 @@ class Metadata(ct.Structure):
                 ("program_id", ct.c_uint16),
                 ("plugin_id", ct.c_uint16),
                 ("probe_id", ct.c_uint16)]
-
-
-class LpmKey(ct.Structure):
-    """C struct representing the LPM_KEY
-
-    Attributes:
-        netmask_len (c_uint32): the length of the netmask
-        ip (c_uint32): the ip specified
-    """
-    _fields_ = [("netmask_len", ct.c_uint32),
-                ("ip", ct.c_uint32)]
 
 
 @dataclass
@@ -108,8 +94,6 @@ class Program:
         offload_device (str): Device used for offloading the program. Default to None
         bpf (BPF): The eBPF compiled program
         f (BPF.Function): The function loaded from the program injected in the chain.
-        __is_destroyed (bool): Boolean value set to True when the instance is destroyed
-
     """
 
     interface: str
@@ -125,22 +109,22 @@ class Program:
     features: Dict[str, MetricFeatures] = field(default_factory=lambda: {})
     offload_device: str = None
 
+    bpf: BPF = field(init=False)
+    f: BPF.Function = field(init=False)
+
     def __post_init__(self):
-        self.__is_destroyed: bool = False
         self.bpf: BPF = BPF(text=self.code, debug=self.debug,
                             cflags=self.cflags, device=self.offload_device)
         self.f: BPF.Function = self.bpf.load_func(
             'internal_handler', self.mode, device=self.offload_device)
+        atexit.unregister(self.bpf.cleanup)
 
     def __del__(self):
         """Method to clear resources deployed in the system"""
-        if self.__is_destroyed:
-            return
         # Calling the BCC defined cleanup function which would have been called while exitting
-        self.__is_destroyed = True
-        atexit.unregister(self.bpf.cleanup)
         self.bpf.cleanup()
         del self.bpf
+        del self.f
 
     def __getitem__(self, key: str) -> Union[QueueStack, TableBase]:
         """Method to access directly the BPF map providing a key.
@@ -151,7 +135,7 @@ class Program:
         Returns:
             Union[QueueStack, TableBase]: The eBPF map requested.
         """
-        return self.bpf[key] if not self.__is_destroyed else exit(1)
+        return self.bpf[key]
 
 
 @dataclass
@@ -160,40 +144,41 @@ class SwapStateCompile:
 
     Attributes:
         __index (int): The index of the current active program
-        __is_destroyed (bool): Variable to keep track of the lifecycle of the object.
         _programs (List[Program]): The list containing the two programs compiled.
         _chain_map (TableBase): The eBPF table performing the chain.
         program_id (int): The ID of the programs.
         mode (int): The mode used for injecting eBPF programs.
         features (Dict[str, MetricFeatures]): The map of features if any. Default None.
     """
-    _programs: List[Program]
-    _chain_map: TableBase
+    _program0: Program
+    _program1: Program
+    _chain_map: str
+    interface: str = field(init=False)
+    idx: int = field(init=False)
+    mode: int = field(init=False)
+    flags: int = field(init=False)
+    features: Dict[str, MetricFeatures] = field(init=False)
 
     def __post_init__(self):
-        self.__is_destroyed = False
         self.__index: int = 0
-        self.program_id: int = self._programs[0].program_id
-        self.mode: int = self._programs[0].mode
-        self.features: Dict[str, MetricFeatures] = self._programs[0].features
+        self.program_id: int = self._program1.program_id
+        self.mode: int = self._program1.mode
+        self.interface = self._program1.interface
+        self.idx = self._program1.idx
+        self.mode = self._program1.mode
+        self.flags = self._program1.flags
+        self.features: Dict[str, MetricFeatures] = self._program1.features
 
     def __del__(self):
         """Method to clear resoruces deployed in the system"""
-        if self.__is_destroyed:
-            return
-        self.__is_destroyed = True
-        if self._programs:
-            for p in self._programs:
-                p.__del__()
-            self._programs.clear()
+        del self._program0
+        del self._program1
 
     def trigger_read(self):
         """Method to trigger the read of the maps, meaning to swap in and out the programs"""
-        if self.__is_destroyed:
-            exit(1)
         self.__index = (self.__index + 1) % 2
-        self.__chain_map[self.program_id-1] = ct.c_int(
-            self._programs[self.__index].f.fd)
+        self._program0[self._chain_map][self.program_id-1] = ct.c_int(
+            getattr(self, '_program{}'.format(self.__index)).f.fd)
 
     def __getitem__(self, key: any) -> any:
         """Method to read from a swapped-out program map the value, given the key
@@ -204,24 +189,10 @@ class SwapStateCompile:
         Returns:
             any: The value corresponding to the provided key
         """
-        if self.__is_destroyed:
-            exit(1)
         index_to_read = int(not self.__index)
         if index_to_read == 1 and key in self.features:
             key += "_1"
-        return self._programs[index_to_read][key]
-
-
-@dataclass
-class ProbeCompilation:
-    """Class representing the compilation object of a Probe.
-
-    Attributes:
-        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook.
-        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook.
-    """
-    ingress: Union[Program, SwapStateCompile] = None
-    egress: Union[Program, SwapStateCompile] = None
+        return getattr(self, '_program{}'.format(index_to_read))[key]
 
 
 @dataclass
@@ -233,7 +204,8 @@ class HookTypeHolder:
         ids (List[int]): List of available IDs to be used for new programs.
         lock (RLock): Lock for the hook.
     """
-    programs: List[Program] = field(default_factory=lambda: [])
+    programs: List[Union[SwapStateCompile, Program]
+                   ] = field(default_factory=lambda: [])
     ids: List[int] = field(default_factory=lambda: list(
         range(1, BPF._MAX_PROGRAMS_PER_HOOK)))
 
@@ -257,10 +229,13 @@ class InterfaceHolder:
     name: str
     flags: int
     offload_device: str
-    ingress_xdp: HookTypeHolder = HookTypeHolder()
-    ingress_tc: HookTypeHolder = HookTypeHolder()
-    egress_xdp: HookTypeHolder = HookTypeHolder()
-    egress_tc: HookTypeHolder = HookTypeHolder()
+    ingress_xdp: HookTypeHolder = field(
+        default_factory=lambda: HookTypeHolder())
+    ingress_tc: HookTypeHolder = field(
+        default_factory=lambda: HookTypeHolder())
+    egress_xdp: HookTypeHolder = field(
+        default_factory=lambda: HookTypeHolder())
+    egress_tc: HookTypeHolder = field(default_factory=lambda: HookTypeHolder())
 
 
 class EbpfCompiler(metaclass=Singleton):
@@ -283,8 +258,6 @@ class EbpfCompiler(metaclass=Singleton):
         __startup (BPF): Startup eBPF program, where logging and control plane buffers are declared.
         __interfaces_programs: Dictionary holding for each interface the list of programs
             and attributes to be used.
-        __is_destroyed (bool): Variable to keep track of the lifecycle of the object.
-
     """
     __logger: ClassVar[logging.Logger] = get_logger("EbpfCompiler")
     __is_batch_supp: ClassVar[bool] = None
@@ -319,13 +292,11 @@ class EbpfCompiler(metaclass=Singleton):
     def __init__(self, log_level: int = logging.INFO, packet_cp_callback: Callable = None, log_cp_callback: Callable = None):
         EbpfCompiler.__logger.setLevel(log_level)
         self.__interfaces_programs: Dict[int, InterfaceHolder] = {}
-        self.__is_destroyed = False
 
         try:
             with IPRoute() as ip:
                 ip.link("add", ifname="DeChainy", kind="dummy")
         except NetlinkError as e:
-            self.__is_destroyed = True
             err, _ = e.args
             EbpfCompiler.__logger.error(
                 "Either another instance of DeChainy is running, or the previous one has not terminated correctly."
@@ -338,35 +309,51 @@ class EbpfCompiler(metaclass=Singleton):
         with open(os.path.join(EbpfCompiler.__base_dir, "startup.h"), 'r') as fp:
             startup_code = remove_c_comments(fp.read())
 
-        self.__startup: BPF = BPF(text=startup_code)
+        startup: BPF = BPF(text=startup_code)
+        atexit.unregister(startup.cleanup)
         if packet_cp_callback:
-            self.__startup['control_plane'].open_perf_buffer(
-                packet_cp_callback)
+            startup['control_plane'].open_perf_buffer(
+                lambda x, y, z: EbpfCompiler.callback_wrapper(x, y, z, packet_cp_callback))
+
         if log_cp_callback:
-            self.__startup['log_buffer'].open_perf_buffer(log_cp_callback)
+            startup['log_buffer'].open_perf_buffer(
+                lambda x, y, z: EbpfCompiler.callback_wrapper(x, y, z, log_cp_callback, log=True))
 
         # Starting daemon process to poll perf buffers for messages
         if packet_cp_callback or log_cp_callback:
             def poll():
                 try:
                     while True:
-                        self.__startup.perf_buffer_poll()
+                        startup.perf_buffer_poll()
                 except Exception:
                     pass
             threading.Thread(target=poll, daemon=True).start()
+        self._startup = startup
+        atexit.register(self.__del__)
 
-        atexit.register(lambda: EbpfCompiler().__del__()
-                        if EbpfCompiler() else None)
+    @staticmethod
+    def callback_wrapper(cpu, data, size, callback, log=True):
+        class Temporary(ct.Structure):
+            _fields_ = [("metadata", Metadata),
+                        ("raw", ct.c_ubyte * (size - ct.sizeof(Metadata)))] if not log else\
+                [("metadata", Metadata),
+                 ("level", ct.c_uint64),
+                 ("args", ct.c_uint64 * 4),
+                 ("message", ct.c_char * (size - (ct.sizeof(ct.c_uint16) * 4) - (ct.sizeof(ct.c_uint64) * 4)))]
+        return callback(cpu, ct.cast(data, ct.POINTER(Temporary)).contents, size)
 
     def __del__(self):
         """Method to clear all the deployed resources from the system"""
-        if self.__is_destroyed:
-            return
-        self.__is_destroyed = True
         # Remove only once all kind of eBPF programs attached to all interfaces in use.
+        atexit.unregister(self.__del__)
+        if not hasattr(self, "_startup"):
+            return
         with IPRoute() as ip:
-            ip.link("del", ifname="DeChainy")
-            for idx in self.__interfaces_programs.keys():
+            try:
+                ip.link("del", ifname="DeChainy")
+            except Exception:
+                pass
+            for idx in list(self.__interfaces_programs.keys()):
                 EbpfCompiler.__logger.info('Removing all programs from Interface Index {}'.format(
                     self.__interfaces_programs[idx].name))
                 with self.__interfaces_programs[idx].ingress_xdp.lock, self.__interfaces_programs[idx].egress_xdp.lock:
@@ -379,6 +366,10 @@ class EbpfCompiler(metaclass=Singleton):
                     if self.__interfaces_programs[idx].ingress_tc.programs or \
                             self.__interfaces_programs[idx].egress_tc.programs:
                         ip.tc("del", "clsact", idx)
+                # tmp = .pop(idx)
+                del self.__interfaces_programs[idx]
+        self._startup.cleanup()
+        del self._startup
 
     def __inject_pivot(
             self,
@@ -416,7 +407,6 @@ class EbpfCompiler(metaclass=Singleton):
                     cflags=EbpfCompiler.__formatted_cflags(mode, program_type),
                     probe_id=-1, plugin_id=-1, debug=False, flags=flags,
                     program_id=0, offload_device=offload_device)
-
         target = getattr(
             self.__interfaces_programs[idx], f'{program_type}_{mode_map_name}')
         with target.lock:
@@ -432,6 +422,7 @@ class EbpfCompiler(metaclass=Singleton):
                           parent=parent, classid=1, direct_action=True)
             target.programs.insert(0, p)
 
+    # TODO: FIX
     def remove_hook(self, program_type: str, program: Union[Program, SwapStateCompile]):
         """Method to remove the program associated to a specific hook. The program chain
         is updated by removing the service from the chain itself.
@@ -440,18 +431,15 @@ class EbpfCompiler(metaclass=Singleton):
             program_type (str): The hook type (ingress/egress).
             program (Union[Program, SwapStateCompile]): The program to be deleted.
         """
-        tmp = program if not isinstance(
-            program, SwapStateCompile) else program._programs[0]
-        mode_map_name = EbpfCompiler.__TC_MAP_SUFFIX if tmp.mode == BPF.SCHED_CLS else EbpfCompiler.__XDP_MAP_SUFFIX
+        mode_map_name = EbpfCompiler.__TC_MAP_SUFFIX if program.mode == BPF.SCHED_CLS else EbpfCompiler.__XDP_MAP_SUFFIX
         next_map_name = f'{program_type}_next_{mode_map_name}'
         type_of_interest = f'{program_type}_{mode_map_name}'
         target = getattr(
-            self.__interfaces_programs[tmp.idx], type_of_interest)
+            self.__interfaces_programs[program.idx], type_of_interest)
 
         with target.lock:
             # Retrieving the index of the Program retrieved
             index = target.programs.index(program)
-            program = tmp
             EbpfCompiler.__logger.info('Deleting Program {} Interface {} Type {}'.format(
                 program.program_id, program.interface, program_type))
 
@@ -461,7 +449,6 @@ class EbpfCompiler(metaclass=Singleton):
             # that also the pivoting has to be removed
             if len(target.programs) == 2:
                 EbpfCompiler.__logger.info('Deleting Also Pivot Program')
-                [x.__del__() for x in reversed(target.programs)]
                 target.programs.clear()
                 # Checking if also the class act or the entire XDP program can be removed
                 if not getattr(self.__interfaces_programs[program.idx], '{}_{}'.format(
@@ -471,7 +458,7 @@ class EbpfCompiler(metaclass=Singleton):
                             ip.tc("del", "clsact", program.idx)
                     else:
                         BPF.remove_xdp(program.interface, program.flags)
-                    del self.__interfaces_programs[tmp.idx]
+                    del self.__interfaces_programs[program.idx]
                 return
 
             if index + 1 != len(target.programs):
@@ -485,7 +472,6 @@ class EbpfCompiler(metaclass=Singleton):
                 # The program is the last one in the list, so set the previous
                 # program to call the following one which will be empty
                 del target.programs[0][next_map_name][target.programs[index-1].program_id]
-            target.programs[index].__del__()
             del target.programs[index]
 
     def patch_hook(self, program_type: str, old_program: Union[Program, SwapStateCompile],
@@ -558,10 +544,10 @@ class EbpfCompiler(metaclass=Singleton):
                              program_id=old_program.program_id, plugin_id=old_program.plugin_id,
                              probe_id=old_program.probe_id, features=features)
                 ret = SwapStateCompile(
-                    [ret, p1], program_chain.programs[0][f'{program_type}_next_{mode_map_name}'])
+                    ret, p1, f'{program_type}_next_{mode_map_name}')
             # Append the main program to the list of programs
             program_chain.programs[index] = ret
-            old_program.__del__()
+            del old_program
 
     def compile_hook(self, program_type: str,
                      code: str, interface: str,
@@ -623,7 +609,7 @@ class EbpfCompiler(metaclass=Singleton):
                 'Compiling Program {} Interface {} Type {} Mode {}'.format(program_id, interface, program_type, mode_map_name))
 
             cflags = cflags + EbpfCompiler.__formatted_cflags(
-                mode, program_type, program_id, plugin_id, probe_id, log_level) + ["-DTEST_EXPORT=1"]
+                mode, program_type, program_id, plugin_id, probe_id, log_level)
 
             original_code, swap_code, features = EbpfCompiler.__precompile_parse(
                 EbpfCompiler.__format_for_hook(mode, program_type, EbpfCompiler.__format_helpers(code)), cflags)
@@ -645,10 +631,10 @@ class EbpfCompiler(metaclass=Singleton):
                              cflags=cflags, offload_device=offload_device, program_id=program_id,
                              plugin_id=plugin_id, probe_id=probe_id, features=features)
                 ret = SwapStateCompile(
-                    [ret, p1], program_chain.programs[0][f'{program_type}_next_{mode_map_name}'])
+                    ret, p1, f'{program_type}_next_{mode_map_name}')
             # Append the main program to the list of programs
             program_chain.programs.append(ret)
-            return ret
+            return weakref.ref(ret)
 
     @staticmethod
     def __formatted_cflags(
