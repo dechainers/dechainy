@@ -23,7 +23,7 @@ from bcc.table import ArrayBase, QueueStack, TableBase
 
 from ..ebpf import BPF, EbpfCompiler, MetricFeatures, Program, SwapStateCompile
 from ..exceptions import (HookDisabledException, MetricUnspecifiedException,
-                          NoCodeProbeException, ProbeNotFoundException)
+                          NoCodeProbeException)
 from ..utility import ctype_to_normal, get_logger
 
 
@@ -37,7 +37,7 @@ class HookSetting:
         code (str): The source code program. Default to None.
     """
     required: bool = False
-    cflags: List[str] = field(default_factory=lambda: [])
+    cflags: List[str] = field(default_factory=list)
     code: str = None
     program_ref: Type[weakref.ReferenceType] = lambda: None
 
@@ -64,11 +64,13 @@ class Probe:
     """
     name: str
     interface: str
+    plugin_id: int
+    probe_id: int
     mode: int = BPF.SCHED_CLS
     flags: int = XDPFlags.SKB_MODE
-    ingress: HookSetting = field(default_factory=lambda: HookSetting())
-    egress: HookSetting = field(default_factory=lambda: HookSetting())
-    extra: dict = field(default_factory=lambda: {})
+    ingress: HookSetting = field(default_factory=HookSetting)
+    egress: HookSetting = field(default_factory=HookSetting)
+    extra: dict = field(default_factory=dict)
     debug: bool = False
     log_level: Union[str, int] = logging.INFO
 
@@ -78,8 +80,12 @@ class Probe:
         self._logger: logging.Logger = get_logger(
             self.__class__.__name__, log_level=self.log_level)
 
+        if not self.ingress.required and not self.egress.required:
+            raise NoCodeProbeException(
+                "No Ingress/Egress hook specified for the probe {}".format(self.name))
+
         for ttype in ["ingress", "egress"]:
-            hook = getattr(self, ttype)
+            hook: HookSetting = getattr(self, ttype)
             hook.code = None
             if not hook.required:
                 continue
@@ -89,17 +95,28 @@ class Probe:
             if os.path.isfile(tmp):
                 with open(tmp, "r") as fp:
                     hook.code = fp.read()
-                continue
-        if not self.ingress.code and not self.egress.code:
-            raise NoCodeProbeException(
-                "No Ingress/Egress Code specified for the probe {}".format(self.name))
+            if not hook.code:
+                raise NoCodeProbeException(
+                    "No code for hook {} for the probe {}".format(ttype, self.name))
+
+            hook.program_ref = EbpfCompiler().compile_hook(
+                ttype, hook.code, self.interface, self.mode,
+                self.flags, hook.cflags, self.debug, self.plugin_id,
+                self.probe_id, self.log_level)
+        self.post_compilation()
 
     def __del__(self):
         """Method to clear all resources associated to the probe, including
         eBPF program and logger."""
         self._logger.manager.loggerDict.pop(self._logger.name)
         del self._logger
-        print("DELEEEETINGGGGG")
+        for ttype in ["ingress", "egress"]:
+            hook: HookSetting = getattr(self, ttype)
+            p = hook.program_ref()
+            if not p:
+                continue
+            EbpfCompiler().remove_hook(ttype, p)
+            del p
 
     def __getitem__(self, key: str) -> Union[str, Program]:
         """Method to access directly Programs in the class

@@ -30,9 +30,7 @@ class TestProbes(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        global controller
         Controller.delete_plugin()
-        del controller
 
     def test1_get_probe_invalid(self):
         global controller
@@ -43,8 +41,8 @@ class TestProbes(unittest.TestCase):
         global controller
         controller.create_probe('valid', 'attempt', interface='lo')
 
-    #def test3_get_probe_valid(self):
-    #    controller.get_probe('valid', 'attempt')
+    def test3_get_probe_valid(self):
+        controller.get_probe('valid', 'attempt')
 
     def test4_remove_probe_invalid1(self):
         global controller
@@ -55,9 +53,9 @@ class TestProbes(unittest.TestCase):
         global controller
         with self.assertRaises(exceptions.PluginNotFoundException):
             controller.delete_probe('aaaaaa', 'attempt')
-#
-    #def test6_remove_probe_valid(self):
-    #    controller.delete_probe('valid', 'attempt')
+
+    def test6_remove_probe_valid(self):
+        controller.delete_probe('valid', 'attempt')
 
 
 if __name__ == '__main__':

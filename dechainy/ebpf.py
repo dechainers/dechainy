@@ -105,8 +105,8 @@ class Program:
     probe_id: int
     plugin_id: int
     debug: bool = False
-    cflags: List[str] = field(default_factory=lambda: [])
-    features: Dict[str, MetricFeatures] = field(default_factory=lambda: {})
+    cflags: List[str] = field(default_factory=list)
+    features: Dict[str, MetricFeatures] = field(default_factory=dict)
     offload_device: str = None
 
     bpf: BPF = field(init=False)
@@ -126,6 +126,9 @@ class Program:
         del self.bpf
         del self.f
 
+    def trigger_read(self):
+        pass
+
     def __getitem__(self, key: str) -> Union[QueueStack, TableBase]:
         """Method to access directly the BPF map providing a key.
 
@@ -139,46 +142,47 @@ class Program:
 
 
 @dataclass
-class SwapStateCompile:
+class SwapStateCompile(Program):
     """Class storing the state of a program when the SWAP of at least 1 map is required.
 
     Attributes:
-        __index (int): The index of the current active program
+        index (int): The index of the current active program
         _programs (List[Program]): The list containing the two programs compiled.
-        _chain_map (TableBase): The eBPF table performing the chain.
+        chain_map (TableBase): The eBPF table performing the chain.
         program_id (int): The ID of the programs.
         mode (int): The mode used for injecting eBPF programs.
         features (Dict[str, MetricFeatures]): The map of features if any. Default None.
     """
-    _program0: Program
-    _program1: Program
-    _chain_map: str
-    interface: str = field(init=False)
-    idx: int = field(init=False)
-    mode: int = field(init=False)
-    flags: int = field(init=False)
-    features: Dict[str, MetricFeatures] = field(init=False)
+    chain_map: str = None
+    code_1: str = None
+
+    bpf_1: BPF = field(init=False)
+    f_1: BPF.Function = field(init=False)
+    index: int = 0
 
     def __post_init__(self):
-        self.__index: int = 0
-        self.program_id: int = self._program1.program_id
-        self.mode: int = self._program1.mode
-        self.interface = self._program1.interface
-        self.idx = self._program1.idx
-        self.mode = self._program1.mode
-        self.flags = self._program1.flags
-        self.features: Dict[str, MetricFeatures] = self._program1.features
+        if not self.chain_map or not self.code_1:
+            raise Exception(
+                "Unable to build SwapStateConfig without all attributes")
+        super().__post_init__()
+        self.bpf_1: BPF = BPF(text=self.code_1, debug=self.debug,
+                              cflags=self.cflags, device=self.offload_device)
+        self.f_1: BPF.Function = self.bpf_1.load_func(
+            'internal_handler', self.mode, device=self.offload_device)
+        atexit.unregister(self.bpf_1.cleanup)
 
     def __del__(self):
         """Method to clear resoruces deployed in the system"""
-        del self._program0
-        del self._program1
+        super().__del__()
+        self.bpf_1.cleanup()
+        del self.bpf_1
+        del self.f_1
 
     def trigger_read(self):
         """Method to trigger the read of the maps, meaning to swap in and out the programs"""
-        self.__index = (self.__index + 1) % 2
-        self._program0[self._chain_map][self.program_id-1] = ct.c_int(
-            getattr(self, '_program{}'.format(self.__index)).f.fd)
+        self.index = (self.index + 1) % 2
+        self.bpf[self.chain_map][self.program_id -
+                                 1] = ct.c_int(self.f.fd if self.index == 0 else self.f_1.fd)
 
     def __getitem__(self, key: any) -> any:
         """Method to read from a swapped-out program map the value, given the key
@@ -189,10 +193,14 @@ class SwapStateCompile:
         Returns:
             any: The value corresponding to the provided key
         """
-        index_to_read = int(not self.__index)
-        if index_to_read == 1 and key in self.features:
+        index_to_read = int(not self.index)
+
+        if index_to_read == 0:
+            return self.bpf[key]
+
+        if key in self.features:
             key += "_1"
-        return getattr(self, '_program{}'.format(index_to_read))[key]
+        return self.bpf_1[key]
 
 
 @dataclass
@@ -205,7 +213,7 @@ class HookTypeHolder:
         lock (RLock): Lock for the hook.
     """
     programs: List[Union[SwapStateCompile, Program]
-                   ] = field(default_factory=lambda: [])
+                   ] = field(default_factory=list)
     ids: List[int] = field(default_factory=lambda: list(
         range(1, BPF._MAX_PROGRAMS_PER_HOOK)))
 
@@ -230,12 +238,12 @@ class InterfaceHolder:
     flags: int
     offload_device: str
     ingress_xdp: HookTypeHolder = field(
-        default_factory=lambda: HookTypeHolder())
+        default_factory=HookTypeHolder)
     ingress_tc: HookTypeHolder = field(
-        default_factory=lambda: HookTypeHolder())
+        default_factory=HookTypeHolder)
     egress_xdp: HookTypeHolder = field(
-        default_factory=lambda: HookTypeHolder())
-    egress_tc: HookTypeHolder = field(default_factory=lambda: HookTypeHolder())
+        default_factory=HookTypeHolder)
+    egress_tc: HookTypeHolder = field(default_factory=HookTypeHolder)
 
 
 class EbpfCompiler(metaclass=Singleton):
@@ -422,7 +430,6 @@ class EbpfCompiler(metaclass=Singleton):
                           parent=parent, classid=1, direct_action=True)
             target.programs.insert(0, p)
 
-    # TODO: FIX
     def remove_hook(self, program_type: str, program: Union[Program, SwapStateCompile]):
         """Method to remove the program associated to a specific hook. The program chain
         is updated by removing the service from the chain itself.
@@ -474,6 +481,7 @@ class EbpfCompiler(metaclass=Singleton):
                 del target.programs[0][next_map_name][target.programs[index-1].program_id]
             del target.programs[index]
 
+    # TODO: CHECK
     def patch_hook(self, program_type: str, old_program: Union[Program, SwapStateCompile],
                    new_code: str, new_cflags: List[str], log_level: int = logging.INFO):
         """Method to patch a specific provided program belonging to a certain hook.
@@ -614,24 +622,21 @@ class EbpfCompiler(metaclass=Singleton):
             original_code, swap_code, features = EbpfCompiler.__precompile_parse(
                 EbpfCompiler.__format_for_hook(mode, program_type, EbpfCompiler.__format_helpers(code)), cflags)
 
-            # Loading compiled "internal_handler" function and set the previous
-            # plugin program to call in the CHAIN to the current function descriptor
-            ret = Program(interface=interface, idx=idx, mode=mode, flags=flags, offload_device=offload_device,
-                          cflags=cflags, debug=debug, code=original_code, program_id=program_id,
-                          plugin_id=plugin_id, probe_id=probe_id, features=features)
+            if swap_code:
+                EbpfCompiler.__logger.info('Compiling Also Swap Code')
+                ret = SwapStateCompile(interface=interface, idx=idx, mode=mode, flags=flags, offload_device=offload_device,
+                                       cflags=cflags, debug=debug, code=original_code, program_id=program_id,
+                                       plugin_id=plugin_id, probe_id=probe_id, features=features,
+                                       chain_map=f'{program_type}_next_{mode_map_name}', code_1=swap_code)
+            else:
+                ret = Program(interface=interface, idx=idx, mode=mode, flags=flags, offload_device=offload_device,
+                              cflags=cflags, debug=debug, code=original_code, program_id=program_id,
+                              plugin_id=plugin_id, probe_id=probe_id, features=features)
 
             # Updating Service Chain
             program_chain.programs[0][f'{program_type}_next_{mode_map_name}'][
                 program_chain.programs[-1].program_id] = ct.c_int(ret.f.fd)
 
-            # Compiling swap program if needed
-            if swap_code:
-                EbpfCompiler.__logger.info('Compiling Also Swap Code')
-                p1 = Program(interface=interface, idx=idx, mode=mode, flags=flags, code=swap_code, debug=debug,
-                             cflags=cflags, offload_device=offload_device, program_id=program_id,
-                             plugin_id=plugin_id, probe_id=probe_id, features=features)
-                ret = SwapStateCompile(
-                    ret, p1, f'{program_type}_next_{mode_map_name}')
             # Append the main program to the list of programs
             program_chain.programs.append(ret)
             return weakref.ref(ret)

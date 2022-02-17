@@ -75,6 +75,8 @@ class SyncPluginsHandler(FileSystemEventHandler):
         plugin_name = os.path.basename(event.src_path)
         if not plugin_name[0].isalpha():
             return
+        if Controller not in Singleton._instances:
+            return
         Controller().sync_plugin_probes(plugin_name)
         Controller._logger.info(
             "Watchdog check for Plugin {} removal".format(plugin_name))
@@ -92,30 +94,28 @@ class Controller(metaclass=Singleton):
             an inner dictionary holding the dictionary of the current deployed probes.
         __observer (Observer): Watchdog thread to keep this instance synchronised with
             the plugin directory.
-        __compiler (EbpfCompiler): The eBPF programs compiler.
+        __compiler (EbpfCompiler): An instance of the eBPF programs compiler, to prevent
+            it to be destroyed in the mean time.
     """
     _plugins_lock: RLock = RLock()
     _logger: logging.Logger = get_logger("Controller")
+
+    _observer = Observer()
+    _observer.daemon = True
+    _observer.schedule(SyncPluginsHandler(), os.path.join(
+        os.path.dirname(__file__), "plugins"), recursive=True)
+    _observer.start()
 
     def __init__(self, log_level=logging.INFO):
         Controller._logger.setLevel(log_level)
         self.__probes_lock: RLock = RLock()
         self.__probes: OrderedDict[str, Dict[str, Probe]] = {}
-        self.__observer = Observer()
-        self.__observer.schedule(SyncPluginsHandler(), os.path.join(
-            os.path.dirname(__file__), "plugins"), recursive=True)
-        self.__observer.daemon = True
-        self.__observer.start()
-        self.__compiler: EbpfCompiler = EbpfCompiler(
-            log_level=log_level,
-            packet_cp_callback=lambda x, y, z: Controller()._packet_cp_callback(x, y, z),
-            log_cp_callback=lambda x, y, z: Controller()._log_cp_callback(x, y, z))
+        self.__compiler = EbpfCompiler(log_level=log_level,
+                                       packet_cp_callback=lambda x, y, z: Controller()._packet_cp_callback(x, y, z),
+                                       log_cp_callback=lambda x, y, z: Controller()._log_cp_callback(x, y, z))
 
     def __del__(self):
         """Method to clear all the deployed resources."""
-        self.__observer.stop()
-        self.__observer.join()
-        del self.__observer
         with self.__probes_lock:
             del self.__probes
         del self.__compiler
@@ -326,7 +326,6 @@ class Controller(metaclass=Singleton):
     # ------------------ Function to manage probes -------------------- #
     #####################################################################
 
-    # TODO: FIX
     def delete_probe(self, plugin_name: str = None, probe_name: str = None):
         """Method to delete probes. If the plugin name is not specified, then
         all the probes deployed are deleted. Otherwise, all the probes belonging
@@ -343,29 +342,35 @@ class Controller(metaclass=Singleton):
         """
         with self.__probes_lock:
             if not plugin_name:
-                target = [p for v in self.__probes.values()
-                          for p in v.values()]
-            else:
-                if probe_name:
-                    target = [self.get_probe(plugin_name, probe_name)]
-                else:
-                    target = [v for v in self.__probes[plugin_name].values()]
-            if not target:
-                raise exceptions.ProbeNotFoundException("No probes to delete")
-            for probe in target:
-                obj = probe.ingress.program_ref()
-                if obj:
-                    self.__compiler.remove_hook("ingress", obj)
-                    del obj
-                obj = probe.egress.program_ref()
-                if obj:
-                    self.__compiler.remove_hook("egress", obj)
-                    del obj
-                del self.__probes[probe.plugin_name][probe.name]
-                if not self.__probes[probe.plugin_name]:
-                    del self.__probes[probe.plugin_name]
+                if not self.__probes:
+                    raise exceptions.ProbeNotFoundException(
+                        "No probes to delete")
+                self.__probes.clear()
+                Controller._logger.info('Successfully deleted all probes')
+                return
+
+            Controller.__check_plugin_exists(plugin_name)
+            if plugin_name not in self.__probes:
+                raise exceptions.ProbeNotFoundException(
+                    "No probes to delete for plugin {}".format(plugin_name))
+
+            if not probe_name:
+                del self.__probes[plugin_name]
                 Controller._logger.info(
-                    f'Successfully deleted Probe {probe.name} for Plugin {probe.plugin_name}')
+                    f'Successfully deleted probes of Plugin {plugin_name}')
+                return
+
+            if probe_name not in self.__probes[plugin_name]:
+                raise exceptions.ProbeNotFoundException(
+                    "Probe {} of plugin {} not found".format(probe_name, plugin_name))
+
+            del self.__probes[plugin_name][probe_name]
+
+            if not self.__probes[plugin_name]:
+                del self.__probes[plugin_name]
+
+            Controller._logger.info(
+                f'Successfully deleted Probe {probe_name} for Plugin {plugin_name}')
 
     def create_probe(self, plugin_name: str, probe_name: str, **kwargs):
         """Method to create the given probe.
@@ -385,22 +390,12 @@ class Controller(metaclass=Singleton):
             if probe_name in self.__probes[plugin_name]:
                 raise exceptions.ProbeAlreadyExistsException(
                     'Probe {} for Plugin {} already exist'.format(probe_name, plugin_name))
-            plugin_id = list(self.__probes.keys()).index(plugin_name)
-            probe_id = len(self.__probes[plugin_name])
-            probe = getattr(module, plugin_name.capitalize())(
-                name=probe_name, **kwargs)
-            for program_type in ["ingress", "egress"]:
-                probe_hook = getattr(probe, program_type)
-                if not probe_hook.code:
-                    continue
-                probe_hook.program_ref = self.__compiler.compile_hook(
-                    program_type, probe_hook.code, probe.interface, probe.mode,
-                    probe.flags, getattr(probe, program_type).cflags,
-                    probe.debug, plugin_id, probe_id, probe.log_level)
-            probe.post_compilation()
-            self.__probes[probe.plugin_name][probe.name] = probe
+            self.__probes[plugin_name][probe_name] = getattr(module, plugin_name.capitalize())(
+                name=probe_name, plugin_id=list(
+                    self.__probes.keys()).index(plugin_name),
+                probe_id=len(self.__probes[plugin_name]), **kwargs)
             Controller._logger.info(
-                f'Successfully created Probe {probe.name} for Plugin {probe.plugin_name}')
+                f'Successfully created Probe {probe_name} for Plugin {plugin_name}')
 
     def get_probe(self, plugin_name: str = None, probe_name: str = None)\
             -> Union[Dict[str, Dict[str, Type[Probe]]], Dict[str, Type[Probe]], Type[Probe]]:
@@ -448,5 +443,4 @@ class Controller(metaclass=Singleton):
             except exceptions.PluginNotFoundException:
                 Controller._logger.info(
                     "Found Probes of deleted Plugin {}".format(plugin_name))
-                for k in list(self.__probes[plugin_name].keys()):
-                    self.delete_probe(plugin_name, k)
+                self.delete_probe(plugin_name)
