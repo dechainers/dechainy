@@ -194,13 +194,15 @@ class SwapStateCompile(Program):
             any: The value corresponding to the provided key
         """
         index_to_read = int(not self.index)
+        if isinstance(key, tuple):
+            if bool(key[1]):
+                index_to_read = self.index
+            key = key[0]
 
-        if index_to_read == 0:
+        if index_to_read == 0 or key not in self.features or not self.features[key].swap:
             return self.bpf[key]
 
-        if key in self.features:
-            key += "_1"
-        return self.bpf_1[key]
+        return self.bpf_1["{}_1".format(key)]
 
 
 @dataclass
@@ -758,7 +760,6 @@ class EbpfCompiler(metaclass=Singleton):
                 else:
                     new_decl = new_decl.replace(map_type, '"extern"').replace(
                         prefix_decl, '_'.join(prefix_decl.split("_")[:2]))
-
             original_code = original_code[:start] + \
                 orig_decl + original_code[end:]
             if cloned_code:
