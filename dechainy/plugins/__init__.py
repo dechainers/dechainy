@@ -54,7 +54,6 @@ class Probe:
         flags (int): The flags to be used if BPF.XDP mode. Default to XDPFlags.SKB_MODE.
         ingress (HookSetting): The configuration of the ingress hook. Default to HookSetting().
         ingress (HookSetting): The configuration of the egress hook. Default to HookSetting().
-        extra (dict): The dictionary containing extra information to be used. Default to {}.
         debug (bool): True if the programs should be compiled in debug mode. Default to False.
         log_level (Union[str, int]): The level of logging to be used. Default to logging.INFO.
         flags (int): Flags used to inject eBPF program when in XDP mode, later inferred. Default to 0.
@@ -70,7 +69,6 @@ class Probe:
     flags: int = XDPFlags.SKB_MODE
     ingress: HookSetting = field(default_factory=HookSetting)
     egress: HookSetting = field(default_factory=HookSetting)
-    extra: dict = field(default_factory=dict)
     debug: bool = False
     log_level: Union[str, int] = logging.INFO
 
@@ -101,7 +99,7 @@ class Probe:
 
             hook.program_ref = EbpfCompiler().compile_hook(
                 ttype, hook.code, self.interface, self.mode,
-                self.flags, hook.cflags, self.debug, self.plugin_id,
+                self.flags, hook.cflags + self.additional_cflags(), self.debug, self.plugin_id,
                 self.probe_id, self.log_level)
         self.post_compilation()
 
@@ -127,7 +125,7 @@ class Probe:
         Returns:
             Union[str, Program]: the compiled Program
         """
-        return getattr(self, key).program_ref()
+        return getattr(self, key.lower()).program_ref()
 
     @property
     def plugin_name(self) -> str:
@@ -255,3 +253,28 @@ class Probe:
             ret[map_name] = self.__do_retrieve_metric(
                 self.programs[program_type][map_name], features)
         return ret
+
+    def patch_hook(self, program_type: str, new_code: str = None, new_cflags: List[str] = []):
+        """Method to patch the code of a specific hook of the probe.
+
+        Args:
+            program_type (str): The hook to be patched
+            new_code (str): The new code to be used. Default None.
+            new_cflags (List[str]): The new cflags to be used. Default [].
+        """
+        if not new_code and not new_cflags:
+            self._logger.info("No difference, skipping patch.")
+        hook_ref: HookSetting = getattr(self, program_type)
+        hook_ref.code = new_code or hook_ref.code
+        hook_ref.cflags = new_cflags or hook_ref.cflags
+        hook_ref.program_ref = EbpfCompiler().patch_hook(
+            program_type, hook_ref.program_ref(),
+            hook_ref.code, hook_ref.cflags + self.additional_cflags(), self.log_level)
+
+    def additional_cflags(self) -> List[str]:
+        """Method to include additional cflags programmed ad-hoc for the plugin.
+
+        Returns:
+            List[str]: List of the additional cflags.
+        """
+        return []

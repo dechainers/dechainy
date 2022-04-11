@@ -34,7 +34,7 @@ def _parse_arguments() -> Dict[str, any]:
 
     for action in ["add", "remove"]:
         tmp = sub_parsers.add_parser(
-            action, help="{} a plugin".format(action.capitalize))
+            action, help="{} a plugin".format(action.capitalize()))
         tmp.add_argument('name', help='plugin name or directory', type=str)
         if action == "add":
             tmp.add_argument(

@@ -260,44 +260,50 @@ class Controller(metaclass=Singleton):
         Raises:
             exceptions.UnknownPluginFormatException: When none of the above formats is provided.
         """
-        with Controller._plugins_lock:
-            dest_path = os.path.join(os.path.dirname(__file__), "plugins")
-            if os.path.isdir(variable):  # take from local path
-                plugin_name = os.path.basename(variable)
-                Controller.__check_plugin_exists(
-                    plugin_name, is_creating=True, update=update)
-                try:
-                    shutil.copytree(variable, os.path.join(
-                        dest_path, plugin_name))
-                except Exception as e:
-                    raise exceptions.UnknownPluginFormatException(e)
-            # download from remote custom
-            elif any(variable.startswith(s) for s in ['http:', 'https:']):
-                if not variable.endswith(".git"):
+        dest_path = os.path.join(os.path.dirname(__file__), "plugins")
+        plugin_name = None
+        try:
+            with Controller._plugins_lock:
+                if os.path.isdir(variable):  # take from local path
+                    plugin_name = os.path.basename(variable)
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    try:
+                        shutil.copytree(variable, os.path.join(
+                            dest_path, plugin_name))
+                    except Exception as e:
+                        raise exceptions.UnknownPluginFormatException(e)
+                # download from remote custom
+                elif any(variable.startswith(s) for s in ['http:', 'https:']):
+                    if not variable.endswith(".git"):
+                        raise exceptions.UnknownPluginFormatException(
+                            "Not git repo, download the plugin and install it by your own please")
+                    plugin_name = variable.split("/")[-1][:-4]
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    try:
+                        Controller.__download_from_remote_git(
+                            dest_path=dest_path, plugin_name=plugin_name, git_url=variable)
+                    except Exception as e:
+                        raise exceptions.UnknownPluginFormatException(e)
+                # download from remote default
+                elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
+                    plugin_name = variable
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    try:
+                        Controller.__download_from_remote_git(
+                            dest_path=dest_path, plugin_name=plugin_name)
+                    except Exception as e:
+                        raise exceptions.UnknownPluginFormatException(e)
+                else:
                     raise exceptions.UnknownPluginFormatException(
-                        "Not git repo, download the plugin and install it by your own please")
-                plugin_name = variable.split("/")[-1][:-4]
-                Controller.__check_plugin_exists(
-                    plugin_name, is_creating=True, update=update)
-                try:
-                    Controller.__download_from_remote_git(
-                        dest_path=dest_path, plugin_name=plugin_name, git_url=variable)
-                except Exception as e:
-                    raise exceptions.UnknownPluginFormatException(e)
-            # download from remote default
-            elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
-                plugin_name = variable
-                Controller.__check_plugin_exists(
-                    plugin_name, is_creating=True, update=update)
-                try:
-                    Controller.__download_from_remote_git(
-                        dest_path=dest_path, plugin_name=plugin_name)
-                except Exception as e:
-                    raise exceptions.UnknownPluginFormatException(e)
-            else:
-                raise exceptions.UnknownPluginFormatException(
-                    "Unable to handle input {}".format(variable))
-            Controller.check_plugin_validity(plugin_name)
+                        "Unable to handle input {}".format(variable))
+                Controller.check_plugin_validity(plugin_name)
+        except Exception as e:
+            if plugin_name and os.path.isdir(os.path.join(dest_path, plugin_name)):
+                os.remove(os.path.join(dest_path, plugin_name))
+            raise e
         Controller._logger.info("Created Plugin {}".format(plugin_name))
 
     @staticmethod

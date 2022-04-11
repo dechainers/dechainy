@@ -483,9 +483,8 @@ class EbpfCompiler(metaclass=Singleton):
                 del target.programs[0][next_map_name][target.programs[index-1].program_id]
             del target.programs[index]
 
-    # TODO: CHECK
     def patch_hook(self, program_type: str, old_program: Union[Program, SwapStateCompile],
-                   new_code: str, new_cflags: List[str], log_level: int = logging.INFO):
+                   new_code: str, new_cflags: List[str], log_level: int = logging.INFO) -> Union[Program, SwapStateCompile]:
         """Method to patch a specific provided program belonging to a certain hook.
         After compiling the new program, if no error are arisen, the old program will be
         completely deleted and substituting with the new one, preserving its position
@@ -503,6 +502,9 @@ class EbpfCompiler(metaclass=Singleton):
                 unknown interface.
             exceptions.ProgramInChainNotFoundException: When the provided program has not
                 been found in the chain.
+
+        Returns:
+            Union[Program, SwapStateCompile]: The patched program.
         """
         if old_program.idx not in self.__interfaces_programs:
             raise exceptions.UnknownInterfaceException(
@@ -558,6 +560,7 @@ class EbpfCompiler(metaclass=Singleton):
             # Append the main program to the list of programs
             program_chain.programs[index] = ret
             del old_program
+            return weakref.ref(ret)
 
     def compile_hook(self, program_type: str,
                      code: str, interface: str,

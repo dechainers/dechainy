@@ -165,14 +165,11 @@ BPF_PERF("extern", control_plane);
 // Helper to send packet to controller
 static __always_inline
 int pkt_to_controller(struct CTXTYPE *ctx, struct pkt_metadata *md) {
-#ifdef XDP
-  return control_plane.perf_submit_skb(ctx, ctx->data_end - ctx->data, md, sizeof(struct pkt_metadata));
-#else
-  return control_plane.perf_submit_skb(ctx, ctx->len, md, sizeof(struct pkt_metadata));
-#endif
+  return control_plane.perf_submit_skb(ctx, md->length, md, sizeof(struct pkt_metadata));
 }
 
 // Helper to compute Unix Epoch time
+static __always_inline
 u64 get_time_epoch(struct CTXTYPE *ctx) {
 #ifdef XDP
   return EPOCH_BASE + bpf_ktime_get_ns();
