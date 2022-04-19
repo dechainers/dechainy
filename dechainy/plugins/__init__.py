@@ -101,7 +101,6 @@ class Probe:
                 ttype, hook.code, self.interface, self.mode,
                 self.flags, hook.cflags + self.additional_cflags(), self.debug, self.plugin_id,
                 self.probe_id, self.log_level)
-        self.post_compilation()
 
     def __del__(self):
         """Method to clear all resources associated to the probe, including
@@ -135,13 +134,6 @@ class Probe:
             str: The name of the plugin.
         """
         return self.__class__.__name__.lower()
-
-    def post_compilation(self):
-        """Method to be called after eBPF programs associated to the probes
-        are compiled. Additional functionalities can be implemented in derived
-        Probe classes.
-        """
-        pass
 
     def handle_packet_cp(self, event: Type[ct.Structure], cpu: int):
         """Method to handle a packet received from the apposite data plane code
@@ -179,12 +171,13 @@ class Probe:
             formatted
         ))
 
-    def __do_retrieve_metric(map_ref: Union[QueueStack, TableBase], features: List[MetricFeatures]) -> any:
+    @staticmethod
+    def __do_retrieve_metric(map_ref: Union[QueueStack, TableBase], features: MetricFeatures) -> any:
         """Method internally used to retrieve data from the underlying eBPF map.
 
         Args:
             map_ref (Union[QueueStack, TableBase]): The reference to the eBPF map.
-            features (List[MetricFeatures]): The features associated to the map.
+            features (MetricFeatures): The features associated to the map.
 
         Returns:
             any: The list of values if multiple ones, or just the first one if it is the only one
@@ -237,21 +230,22 @@ class Probe:
         if not getattr(self, program_type):
             raise HookDisabledException(
                 f"The hook {program_type} is not active for this probe")
-        if isinstance(self.programs[program_type], SwapStateCompile):
-            self.programs[program_type].trigger_read()
+        phook: HookSetting = getattr(self, program_type).program_ref()
+
+        if isinstance(phook, SwapStateCompile):
+            phook.trigger_read()
 
         if metric_name:
-            features = self.programs[program_type].features[metric_name]
-            if not features.export:
+            if metric_name not in phook.features or not phook.features[metric_name].export:
                 raise MetricUnspecifiedException(
                     f"Metric {metric_name} unspecified")
-            return self.__do_retrieve_metric(self.programs[program_type][metric_name], features)
+            return self.__do_retrieve_metric(phook[metric_name], phook.features[metric_name])
         ret = {}
-        for map_name, features in self.programs[program_type].features.items():
+        for map_name, features in phook.features.items():
             if not features.export:
                 continue
             ret[map_name] = self.__do_retrieve_metric(
-                self.programs[program_type][map_name], features)
+                phook[map_name], features)
         return ret
 
     def patch_hook(self, program_type: str, new_code: str = None, new_cflags: List[str] = []):

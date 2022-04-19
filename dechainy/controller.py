@@ -302,7 +302,7 @@ class Controller(metaclass=Singleton):
                 Controller.check_plugin_validity(plugin_name)
         except Exception as e:
             if plugin_name and os.path.isdir(os.path.join(dest_path, plugin_name)):
-                os.remove(os.path.join(dest_path, plugin_name))
+                shutil.rmtree(os.path.join(dest_path, plugin_name))
             raise e
         Controller._logger.info("Created Plugin {}".format(plugin_name))
 
