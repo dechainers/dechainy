@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,74 +11,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from os import getcwd
-from os.path import isfile
-from json import load
-from signal import SIGINT, SIGTERM, signal, pause
+import argparse
+from typing import Dict
 
-from .configurations import AppConfig, ServerConfig
-from . import Controller, create_server
-
-# The path to check for the startup file is <current>/startup.json
-__startup_file = f'{getcwd()}/startup.json'
+from .controller import Controller
 
 
-def __spawn_server(config: AppConfig):
-    """Function to create an instance of DeChainy with also the server instance.
+def _parse_arguments() -> Dict[str, any]:
+    """Function to declare and parse command line arguments
 
-    Args:
-        config (AppConfig): the startup configuration detetched
+    Returns:
+        Dict[str, any]: The dictionary of arguments.
     """
-    app, controller = create_server(
-        log_level=config.log_level, plugins_to_load=config.plugins, custom_cp=config.custom_cp)
-    for cluster in config.clusters:
-        controller.create_cluster(cluster.name, cluster)
-    for probe in config.probes:
-        controller.create_probe(probe.plugin_name, probe.name, probe)
-    # NB: the live debug mode gives problems, avoid it
-    app.run(
-        debug=False,
-        host=config.server.address,
-        port=config.server.port,
-        use_reloader=False)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
+    sub_parsers = parser.add_subparsers(
+        title="Action",
+        description="Select the action",
+        dest="action",
+        required=True)
 
-def __spawn_local(config: AppConfig):
-    """Function to create an instance of DeChainy without the server instance.
-
-    Args:
-        config (AppConfig): the startup configuration
-    """
-    # As there is no server, if no probes specified then exit immediately
-    if not config.clusters and not config.probes:
-        print(
-            'No probes or clusters specified, starting DeChainy locally wouldn\'t make sense')
-        exit(1)
-    controller = Controller(log_level=config.log_level,
-                            plugins_to_load=config.plugins, custom_cp=config.custom_cp)
-    for cluster in config.clusters:
-        controller.create_cluster(cluster.name, cluster)
-    for probe in config.probes:
-        controller.create_probe(probe.plugin_name, probe.name, probe)
-    signal(SIGINT, lambda x, y: None)
-    signal(SIGTERM, lambda x, y: None)
-    pause()
+    for action in ["add", "remove"]:
+        tmp = sub_parsers.add_parser(
+            action, help="{} a plugin".format(action.capitalize()))
+        tmp.add_argument('name', help='plugin name or directory', type=str)
+        if action == "add":
+            tmp.add_argument(
+                '-u', '--update', help='update the plugin if present', action='store_true')
+    return parser.parse_args().__dict__
 
 
 def main():
-    """Function used when the module is called as main file. It provides, given the provided (or not)
-    startup file, a running Controller and optionally a REST server
-    """
-    config: AppConfig = AppConfig()
+    """Main Function to provide utility for installing/removing plugins.
+    Installation can be made from local directory, remote personal repository or
+    other dechainy_plugin_* repositories."""
+    args = _parse_arguments()
 
-    if not isfile(__startup_file):
-        config.server = ServerConfig()
-        __spawn_server(config=config)
+    if args["action"] == "remove":
+        Controller.delete_plugin(args["name"])
     else:
-        with open(__startup_file) as fp:
-            config = AppConfig(load(fp))
-        __spawn_server(
-            config=config) if config.server else __spawn_local(config)
+        Controller.create_plugin(args["name"], update=args["update"])
 
 
 if __name__ == '__main__':

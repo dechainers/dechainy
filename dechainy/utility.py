@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,65 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ctypes as ct
+import logging
 import re
-import os
-import signal
-import time
-import setproctitle
+import socket
+import fcntl
+import ipaddress
+import struct
+from typing import Tuple
 
-from socket import inet_aton, htons, ntohs, inet_ntoa
-from struct import unpack
-from multiprocessing import Process
-from typing import Callable
-
-
-class Dict(dict):
-    """Utility class to define a Class  attributes accessible also with square brackets"""
-    __delattr__ = dict.__delitem__
-    __setattr__ = dict.__setitem__
-    __getattr__ = dict.get
+from weakref import WeakValueDictionary
 
 
 class Singleton(type):
     """Metatype utility class to define a Singleton Pattern
 
     Attributes:
-        _instance(object): The instance of the Singleton
+        _instances(WeakValueDictionary): The instances of the Singletons
     """
-    _instance: object = None
+    _instances = WeakValueDictionary()
 
     def __call__(cls, *args, **kwargs):
-        if not cls._instance:
-            cls._instance = super(Singleton, cls).__call__(*args, **kwargs)
-        return cls._instance
-
-
-class CPProcess(Process):
-    """Utility class to create a Process (stopped when destroying its proprietary)
-    to execute a function locally every time_window.
-
-    Args:
-        target_fun (Callable): The function to execute periodically
-        ent (BaseEntity): The entity which invoked the function
-        time_window (int): The periodic restart value
-        name (str): The name of the created process
-        daemon (bool): The daemon mode. Default False.
-    """
-
-    def __init__(self, target_fun: Callable, ent, time_window: float, name: str, daemon: bool = False):
-        Process.__init__(self, target=self.cp_run, args=(
-            target_fun, ent, time_window, name,), daemon=daemon)
-
-    def stop(self):
-        """Function called by the proprietary to stop the Process"""
-        os.kill(self.pid, signal.SIGINT)
-
-    def cp_run(self, target_fun, ent, time_window, name):
-        """Function to execute the provided function, if no stop signal registered within the time_window provided."""
-        setproctitle.setproctitle(name)
-        while True:
-            time.sleep(time_window)
-            target_fun(ent) if ent else target_fun()
+        if cls not in cls._instances:
+            instance = super(Singleton, cls).__call__(*args, **kwargs)
+            cls._instances[cls] = instance
+        return cls._instances[cls]
 
 
 def remove_c_comments(text: str) -> str:
@@ -95,12 +60,31 @@ def remove_c_comments(text: str) -> str:
     return re.sub(pattern, replacer, text)
 
 
-# Simple dictionary containing protocol names and their integer value
-__protocol_map = {
-    "ICMP": 1,
-    "TCP": 6,
-    "UDP": 17
-}
+def native_get_interface_ip_netmask(interface: str) -> Tuple[str, int]:
+    """Function to return the IP address and netmask of
+    a given interface.
+
+    Args:
+        interface (str): The interface of interest.
+
+    Returns:
+        Tuple[str, int]: The IP address and netmask.
+    """
+    addr = netmask = s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        addr = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            0x8915,  # SIOCGIFADDR
+            struct.pack('256s', bytes(interface, 'utf-8')))[20:24])
+        netmask = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            35099,
+            struct.pack('256s', bytes(interface, 'utf-8')))[20:24])
+        netmask = ipaddress.IPv4Network('0.0.0.0/{}'.format(netmask)).prefixlen
+    finally:
+        s.close()
+    return addr, netmask
 
 
 def protocol_to_int(name: str) -> int:
@@ -112,7 +96,11 @@ def protocol_to_int(name: str) -> int:
     Returns:
         int: the integer value of the protocol
     """
-    return __protocol_map[name.upper()]
+    return socket.getprotobyname(name)
+
+
+__proto_int_to_str = {num: name[8:] for name, num in vars(
+    socket).items() if name.startswith("IPPROTO")}
 
 
 def protocol_to_string(value: int) -> str:
@@ -127,10 +115,7 @@ def protocol_to_string(value: int) -> str:
     Returns:
         str: the name of the protocol
     """
-    for key, val in __protocol_map.items():
-        if val == value:
-            return key
-    raise Exception(f"Unknown Protocol {value}")
+    return __proto_int_to_str[value]
 
 
 def ipv4_to_network_int(address: str) -> int:
@@ -142,7 +127,7 @@ def ipv4_to_network_int(address: str) -> int:
     Returns:
         int: the big endian representation of the address
     """
-    return unpack('<I', inet_aton(address))[0]
+    return struct.unpack('<I', socket.inet_aton(address))[0]
 
 
 def port_to_network_int(port: int) -> int:
@@ -154,7 +139,7 @@ def port_to_network_int(port: int) -> int:
     Returns:
         int: the big endian representation of the port
     """
-    return htons(port)
+    return socket.htons(port)
 
 
 def ipv4_to_string(address: int) -> str:
@@ -166,7 +151,7 @@ def ipv4_to_string(address: int) -> str:
     Returns:
         str: the address as string
     """
-    return inet_ntoa(address.to_bytes(4, 'little'))
+    return socket.inet_ntoa(address.to_bytes(4, 'little'))
 
 
 def port_to_host_int(port: int) -> int:
@@ -178,7 +163,14 @@ def port_to_host_int(port: int) -> int:
     Returns:
         int: the little endian representation of the port
     """
-    return ntohs(port)
+    return socket.ntohs(port)
+
+
+def cint_type_limit(c_int_type):
+    signed = c_int_type(-1).value < c_int_type(0).value
+    bit_size = ct.sizeof(c_int_type) * 8
+    signed_limit = 2 ** (bit_size - 1)
+    return (-signed_limit, signed_limit - 1) if signed else (0, 2 * signed_limit - 1)
 
 
 def ctype_to_normal(obj: any) -> any:
@@ -222,3 +214,28 @@ def ctype_to_normal(obj: any) -> any:
                 result[key] = ctype_to_normal(value)
 
         return result
+
+
+def get_logger(name: str, filepath: str = None, log_level: int = logging.INFO) -> logging.Logger:
+    """Function to create a logger or retrieve it if already created.
+
+    Args:
+        name (str): The name of the logger.
+        filepath (str, optional): Path to the logging file, if required. Defaults to None.
+        log_level (int, optional): Log Level taken from the logging module. Defaults to logging.INFO.
+
+    Returns:
+        logging.Logger: The logger created/retrieved.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(log_level)
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handlers = [logging.StreamHandler()]
+    if filepath:
+        handlers.append(logging.FileHandler(filepath, mode="w"))
+    for h in handlers:
+        h.setLevel(log_level)
+        h.setFormatter(formatter)
+        logger.addHandler(h)
+    return logger

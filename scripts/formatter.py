@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ def main():
         import pyperclip
         pyperclip.copy(content)
         print("Content successfully copied to clipboard!")
-    except:
+    except Exception:
         print(content)
 
 

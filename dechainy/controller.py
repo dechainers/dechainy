@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,691 +11,442 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from atexit import register
-from logging import getLogger, INFO, StreamHandler, Formatter
-from types import ModuleType
-from typing import Dict, List, Union
-from pyroute2 import IPRoute
-from pyroute2.netlink.exceptions import NetlinkError
-from bcc import BPF
-from os.path import isfile, dirname
 import ctypes as ct
-import sys
-import setproctitle
+import dataclasses
+import itertools
+import logging
+import os
+import shutil
+from importlib import import_module
+from threading import RLock
+from types import ModuleType
+from typing import Dict, List, OrderedDict, Type, Union
 
-from .exceptions import ClusterWithoutCPException, CustomCPDisabledException, UnknownInterfaceException, NoCodeProbeException
-from .ebpf import get_cflags, get_bpf_values, get_formatted_code, \
-    get_pivoting_code, get_startup_code, precompile_parse, \
-    Program, Metadata, SwapStateCompile, InterfaceHolder, ProbeCompilation, ClusterCompilation
-from .configurations import ClusterConfig, PluginConfig, ProbeConfig
-from .plugins import Cluster, Plugin
-from .utility import CPProcess, Singleton
-from . import exceptions
-from . import plugins
+from watchdog.events import (DirCreatedEvent, DirDeletedEvent, FileSystemEvent,
+                             FileSystemEventHandler)
+from watchdog.observers import Observer
+
+from . import base_url, exceptions
+from .ebpf import EbpfCompiler
+from .plugins import Probe
+from .utility import Singleton, get_logger
+
+
+class SyncPluginsHandler(FileSystemEventHandler):
+    """Watchdog class for file system modification to plugins and
+    synchronization with the current deployed resources.
+    If a plugin is removed from the directory, this component
+    automatically removes all the probes of that plugin for
+    coherency."""
+
+    def on_created(self, event: FileSystemEvent):
+        """Method to be called when a directory in the plugin
+        folder is created, whether it is a legitimate plugin
+        or not. If not already checked, this methods forces
+        the Controller to check the newly created Plugin validity.
+
+        Args:
+            event (FileSystemEvent): The base event.
+        """
+        if not isinstance(event, DirCreatedEvent):
+            return
+        plugin_name = os.path.basename(event.src_path)
+        if not plugin_name[0].isalpha():
+            return
+        with Controller._plugins_lock:
+            try:
+                Controller.check_plugin_validity(plugin_name)
+                Controller._logger.info(
+                    "Watchdog check for Plugin {} creation".format(plugin_name))
+            except Exception:
+                pass
+
+    def on_deleted(self, event: FileSystemEvent):
+        """Function to be called everytime a directory is removed
+        from the plugin folder, whether it is a legitimate plugin or
+        not. This method enforces the Controller to check whether there
+        are probes of that plugin deployed, and in case remove them.
+
+        Args:
+            event (FileSystemEvent): The base event
+        """
+        if not isinstance(event, DirDeletedEvent):
+            return
+        plugin_name = os.path.basename(event.src_path)
+        if not plugin_name[0].isalpha():
+            return
+        if Controller not in Singleton._instances:
+            return
+        Controller().sync_plugin_probes(plugin_name)
+        Controller._logger.info(
+            "Watchdog check for Plugin {} removal".format(plugin_name))
 
 
 class Controller(metaclass=Singleton):
-    """
-    Singleton Controller class responsible of:
-    - keeping track of clusters, probes and programs
-    - compiling/removing programs from the interfaces
+    """Class (Singleton) for managing deployed and available resources.
 
-    All its public methods can be used both within an HTTP server, or locally by calling controller.method()
+    Static Attributes:
+        _plugins_lock(RLock): The mutex for the plugins.
+        _logger (Logger): The class logger.
 
     Attributes:
-        logger (Logger): The class logger
-        declarations (Dict[str, PluginConfig]): A dictionary containing, for each Plugin,
-                                            its class declaration and eBPF codes (if not customizable)
-        programs (Dict[int, InterfaceHolder]): A dictionary containing, for each interface index,
-                                            the object holding all eBPF programs, for each type (TC, XDP, ingress/egress)
-        probes (Dict[str, Dict[str, Plugin]]): A dictionary containing, for each plugin,
-                                            an inner dictionary holding the Plugin instance, given its name
-        clusters (Dict[str, Cluster]): A dictionary of Clusters, individualized by their names
-        custom_cp (bool): True if enabled the possibility to accept user-define Control plane code,
-                                            False otherwise. Default True.
-        is_destroyed (bool): Variable to keep track of the instance lifecycle
-        ip (IPRoute): the IPRoute instance, used for the entire app lifecycle
-        startup (BPF): the startup eBPF compiled program, used to open perf buffers
+        __probes (Dict[str, Dict[str, Type[Probe]]]): A dictionary containing, for each plugin,
+            an inner dictionary holding the dictionary of the current deployed probes.
+        __observer (Observer): Watchdog thread to keep this instance synchronised with
+            the plugin directory.
+        __compiler (EbpfCompiler): An instance of the eBPF programs compiler, to prevent
+            it to be destroyed in the mean time.
     """
+    _plugins_lock: RLock = RLock()
+    _logger: logging.Logger = get_logger("Controller")
 
-    def __init__(self, log_level: int = INFO, plugins_to_load: List[str] = None, custom_cp: bool = True):
-        # Initializing logger
-        self.__logger = getLogger(self.__class__.__name__)
-        self.__logger.setLevel(log_level)
-        ch = StreamHandler()
-        ch.setLevel(log_level)
-        ch.setFormatter(
-            Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        self.__logger.addHandler(ch)
+    _observer = Observer()
+    _observer.daemon = True
+    _observer.schedule(SyncPluginsHandler(), os.path.join(
+        os.path.dirname(__file__), "plugins"), recursive=True)
+    _observer.start()
 
-        # Initializing local variables
-        # TODO: add lock to instances map, clusters and programs
-        self.__declarations: Dict[str, PluginConfig] = {}
-        self.__programs: Dict[int, InterfaceHolder] = {}
-        self.__probes: Dict[str, Dict[str, Plugin]] = {}
-        self.__clusters: Dict[str, Cluster] = {}
-        self.__custom_cp: bool = custom_cp
-        self.__is_destroyed: bool = False
-
-        # Initialize IpRoute and check whether there's another instance of the
-        # framework running
-        self.__ip: IPRoute = IPRoute()
-
-        try:
-            self.__ip.link("add", ifname="DeChainy", kind="dummy")
-        except NetlinkError as e:
-            self.__is_destroyed = True
-            err, _ = e.args
-            self.__logger.error(
-                "Either another instance of DeChainy is running, or the previous one has not terminated correctly."
-                "In the latter case, try 'sudo ip link del DeChainy', and 'sudo tc qdisc del dev <interface> clsact'"
-                "for every interface you used before." if err == 17 else "Need sudo privileges to run.")
-            exit(1)
-
-        # Compiling startup program with buffers
-        self.__startup: BPF = BPF(text=get_startup_code())
-        self.__startup['control_plane'].open_perf_buffer(self.__parse_packet)
-        self.__startup['log_buffer'].open_perf_buffer(self.__log_function)
-
-        # Starting daemon process to poll perf buffers for messages
-        CPProcess(target_fun=self.__startup.perf_buffer_poll,
-                  ent=None, time_window=0,
-                  name="DeChainy-PerfBufferPoller",
-                  daemon=True).start()
-        register(self.__del__)
-
-        # Verifying received plugins_to_load, else load all plugins
-        default_plugins = [x.__name__.lower()
-                           for x in plugins.Plugin.__subclasses__()]
-        if plugins_to_load:
-            for plugin in plugins_to_load:
-                if plugin not in default_plugins:
-                    self.__log_and_raise(
-                        f'Plugin {plugin} not found, unable to load',
-                        exceptions.PluginNotFoundException)
-        else:
-            plugins_to_load = default_plugins
-
-        base_dir = dirname(__file__)
-        # For each plugin to load, retrieve:
-        # - Class declaration
-        # - Ingress and Egress code if the probe is not Programmable like Adaptmon
-        for plugin_name in plugins_to_load:
-            class_def = getattr(plugins, plugin_name.capitalize())
-            self.__probes[plugin_name] = {}
-            codes = {"ingress": None, "egress": None}
-            path = f'{base_dir}/sourcebpf/{plugin_name}.c'
-            if not class_def.is_programmable() and isfile(path):
-                with open(path, 'r') as fp:
-                    code = fp.read()
-                for hook in class_def.accepted_hooks():
-                    codes[hook] = code
-                self.__logger.info(
-                    f'Loaded BPF code from file for Plugin {plugin_name}')
-            self.__declarations[plugin_name] = PluginConfig(
-                class_def, codes["ingress"], codes["egress"])
-        setproctitle.setproctitle("DeChainy-Controller")
+    def __init__(self, log_level=logging.INFO):
+        Controller._logger.setLevel(log_level)
+        self.__probes_lock: RLock = RLock()
+        self.__probes: OrderedDict[str, Dict[str, Probe]] = {}
+        self.__compiler = EbpfCompiler(log_level=log_level,
+                                       packet_cp_callback=lambda x, y, z: Controller()._packet_cp_callback(x, y, z),
+                                       log_cp_callback=lambda x, y, z: Controller()._log_cp_callback(x, y, z))
 
     def __del__(self):
-        if self.__is_destroyed:
-            return
-        self.__is_destroyed = True
-        self.__logger.info('Deleting eBPF programs')
-        # Remove only once all kind of eBPF programs attached to all interfaces in use.
-        for idx in self.__programs.keys():
-            if self.__programs[idx].ingress_xdp or self.__programs[idx].egress_xdp:
-                BPF.remove_xdp(
-                    self.__programs[idx].name, self.__programs[idx].flags)
-            if self.__programs[idx].ingress_tc or self.__programs[idx].egress_tc:
-                self.__ip.tc("del", "clsact", idx)
-        self.__ip.link("del", ifname="DeChainy")
-        # Delete all Plugins and Clusters
-        for v in self.__probes.values():
-            for vv in v.values():
-                vv.__del__()
+        """Method to clear all the deployed resources."""
+        with self.__probes_lock:
+            del self.__probes
+        del self.__compiler
 
-    def __log_and_raise(self, msg: str, exception: Exception):
-        """Method to log a message and raise the specified exception
-
-        Args:
-            msg (str): The message string to log
-            exception (Exception): The exception to throw
-
-        Raises:
-            exception: The exception specified to be thrown
-        """
-        self.__logger.error(msg)
-        raise exception(msg)
-
-    #####################################################################
-    # ---------------- Function to manage plugins -----------------------
-    #####################################################################
-
-    def get_active_plugins(self) -> List[str]:
-        """Function to return all active plugins in the actual configuration.
-
-        Returns:
-            List[str]: All the active plugins names
-        """
-        return self.__declarations.keys()
-
-    #####################################################################
-    # ----------- Function to manage single probes ----------------------
-    #####################################################################
-
-    def __check_probe_exists(self, plugin_name: str, probe_name: str, is_creating=False):
-        """Function to check whether a probe instance exists, and throw an exception if needed
-        (when not creating a probe)
-
-        Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
-            is_creating (bool, optional): True when creating the probe, no exception thrown. Defaults to False.
-        """
-        if plugin_name not in self.__declarations:
-            self.__log_and_raise(
-                f'Plugin {plugin_name} not found',
-                exceptions.PluginNotFoundException)
-        if is_creating and probe_name in self.__probes[plugin_name]:
-            self.__log_and_raise(
-                f'Probe {probe_name} for Plugin {plugin_name} already exist',
-                exceptions.ProbeAlreadyExistsException)
-        if not is_creating and probe_name not in self.__probes[plugin_name]:
-            self.__log_and_raise(
-                f'Probe {probe_name} for Plugin {plugin_name} not found',
-                exceptions.ProbeNotFoundException)
-
-    def delete_probe(self, plugin_name: str, probe_name: str) -> str:
-        """Function to delete a probe of a specific plugin.
-
-        Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
-
-        Returns:
-            str: The name of the probe deleted
-        """
-        self.__check_probe_exists(plugin_name, probe_name)
-        if self.__probes[plugin_name][probe_name].is_in_cluster():
-            self.__log_and_raise(
-                f'Probe {probe_name} of Plugin {plugin_name} is in a cluster',
-                exceptions.ProbeInClusterException)
-        self.__remove_probe_programs(
-            self.__probes[plugin_name][probe_name].programs)
-        if self.__probes[plugin_name][probe_name]._config.cp_function and self.__custom_cp:
-            del sys.modules[f'{plugin_name}_{probe_name}']
-        del self.__probes[plugin_name][probe_name]
-        self.__logger.info(
-            f'Successfully deleted probe {probe_name} for plugin {plugin_name}')
-        return probe_name
-
-    def create_probe(
-            self,
-            plugin_name: str,
-            probe_name: str,
-            conf: ProbeConfig) -> str:
-        """Method to create a probe instance of a specific plugin
-
-        Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
-            conf (ProbeConfig): The configuration used to create the probe
-
-        Raises:
-            NoCodeProbeException: There is no eBPF code, neither for Ingress and Egress hook
-
-        Returns:
-            str: The name of the probe created
-        """
-        self.__check_probe_exists(plugin_name, probe_name, is_creating=True)
-        conf.plugin_name = plugin_name
-        conf.name = probe_name
-        module: ModuleType = None
-        # If the probe is not programmable, get already loaded codes, else check whether the probe has
-        # a Control Plane function specified and load it as module.
-        if not self.__declarations[plugin_name].class_declaration.is_programmable():
-            accepted_hooks = self.__declarations[plugin_name].class_declaration.accepted_hooks(
-            )
-            for hook in ["ingress", "egress"]:
-                conf[hook] = None if hook not in accepted_hooks or conf[hook] is False \
-                    else self.__declarations[plugin_name][hook]
-        if not conf.ingress and not conf.egress:
-            raise NoCodeProbeException("There is no Ingress/Egress code active for this probe,"
-                                       " must leave at least 1 accepted hook active")
-        if conf.cp_function and self.__custom_cp:
-            module = ModuleType(f'{plugin_name}_{probe_name}')
-            sys.modules[f'{plugin_name}_{probe_name}'] = module
-            exec(conf.cp_function, module.__dict__)
-            if hasattr(module, "pre_compilation"):
-                module.pre_compilation(conf)
-        comp = self.__compile(
-            conf, self.__declarations[plugin_name].class_declaration)
-        prb = self.__declarations[plugin_name].class_declaration(
-            conf, module, comp)
-        self.__probes[plugin_name][probe_name] = prb
-        self.__logger.info(
-            f'Successfully created probe {probe_name} for plugin {plugin_name}')
-        return probe_name
-
-    def get_probe(self, plugin_name: str, probe_name: str) -> ProbeConfig:
-        """Function to return a given probe of a given plugin
-
-        Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The name of the probe
-
-        Returns:
-            ProbeConfig: The configuration of the retrieved probe
-        """
-        self.__check_probe_exists(plugin_name, probe_name)
-        return self.__probes[plugin_name][probe_name].__repr__()
-
-    def execute_cp_function_probe(
-            self,
-            plugin_name: str,
-            probe_name: str,
-            func_name: str,
-            *argv: tuple) -> any:
-        """Function to call a specific Control Plane function of a probe
-
-        Args:
-            plugin_name (str): The name of the plugin
-            probe_name (str): The probe which executed the function
-            func (str): The name of the function to be called
-            argv (tuple): The list of arguments
-
-        Returns:
-            any: The return type specified in the called function
-        """
-        self.__check_probe_exists(plugin_name, probe_name)
-        if not self.__custom_cp:
-            raise CustomCPDisabledException(
-                "Restart the framework without `custom_cp`: false")
-        try:
-            return getattr(self.__probes[plugin_name][probe_name], f'{func_name}')(*argv)
-        except AttributeError:
-            self.__log_and_raise(
-                f'Probe {probe_name} of Plugin {plugin_name} does not support function {func_name}',
-                exceptions.UnsupportedOperationException)
-
-    ######################################################################
-    # ----------- Function to manage clusters -------------------------
-    #####################################################################
-
-    def __check_cluster_exists(self, cluster_name: str, is_creating=False):
-        """Method to check whether a cluster exists, and throw exception if not creating
-
-        Args:
-            cluster_name (str): The name of the cluster
-            is_creating (bool, optional): True if function called when creating cluster. Defaults to False.
-        """
-        if not self.__custom_cp:
-            self.__log_and_raise(
-                "Restart the framework without `cp_function`: false",
-                CustomCPDisabledException)
-
-        if not is_creating and cluster_name not in self.__clusters:
-            self.__log_and_raise(
-                f'Cluster {cluster_name} not found',
-                exceptions.ClusterNotFoundException)
-
-    def create_cluster(self, cluster_name: str, conf: ClusterConfig) -> str:
-        """Function to create a cluster given its name and the configuration.
-
-        Args:
-            cluster_name (str): The name of the cluster
-            conf (ClusterConfig): The configuration of the cluster
-
-        Returns:
-            str: The name of the cluster created
-        """
-        self.__check_cluster_exists(cluster_name, is_creating=True)
-        if not conf.cp_function:
-            self.__log_and_raise(
-                'No Control plane code speficied, the Cluster would not make sense',
-                ClusterWithoutCPException)
-        conf.name = cluster_name
-        cluster_comp = ClusterCompilation()
-        for probe_config in conf.probes:
-            if probe_config.plugin_name not in cluster_comp:
-                cluster_comp[probe_config.plugin_name] = {}
-            probe_config.is_in_cluster = True
-            self.create_probe(
-                probe_config.plugin_name, probe_config.name, probe_config)
-            cluster_comp[probe_config.plugin_name][probe_config.name] = \
-                self.__probes[probe_config.plugin_name][probe_config.name]
-        module = None
-        # Loading the Control Plane function of the Cluster if any
-        module = ModuleType(cluster_name)
-        sys.modules[cluster_name] = module
-        exec(conf.cp_function, module.__dict__)
-        if hasattr(module, "pre_compilation"):
-            module.pre_compilation(conf)
-        self.__clusters[cluster_name] = plugins.Cluster(
-            conf, module, cluster_comp)
-        self.__logger.info(f'Successfully created Cluster {cluster_name}')
-        return cluster_name
-
-    def delete_cluster(self, cluster_name: str) -> str:
-        """Function to delete a cluster given its name.
-
-        Args:
-            cluster_name (str): The name of the cluster
-
-        Returns:
-            str: The name of the deleted cluster
-        """
-        self.__check_cluster_exists(cluster_name)
-        cluster = self.__clusters.pop(cluster_name)
-        cluster.__del__()
-        for plugin_name, probe_map in cluster.programs.items():
-            for probe_name in probe_map.keys():
-                self.__probes[plugin_name][probe_name]._config.is_in_cluster = False
-                self.delete_probe(plugin_name, probe_name)
-        del sys.modules[cluster_name]
-        self.__logger.info(f'Successfully deleted Cluster {cluster_name}')
-        return cluster_name
-
-    def get_cluster(self, cluster_name: str) -> ClusterConfig:
-        """Function to return a Cluster configuration given its name
-
-        Args:
-            cluster_name (str): The name of the cluster
-
-        Returns:
-            ClusterConfig: The configuration of the retrieved cluster
-        """
-        self.__check_cluster_exists(cluster_name)
-        return self.__clusters[cluster_name].__repr__()
-
-    def execute_cp_function_cluster(self, cluster_name: str) -> any:
-        """Function to execute a Control Plane function of a cluster
-
-        Args:
-            cluster_name (str): The name of the cluster
-            argv (tuple): The list of arguments
-
-        Returns:
-            any: The return type specified in the user-defined function
-        """
-        self.__check_cluster_exists(cluster_name)
-        # This function exists by design, otherwise the Cluster would not have been created
-        return getattr(self.__clusters[cluster_name], 'exec')()
-
-    ######################################################################
-    # ------------- Function to manage bpf code --------------------------
-    ######################################################################
-
-    def __log_function(
-            self,
-            cpu: int,
-            data: ct.POINTER(
-                ct.c_void_p),
-            size: int):
-        """Method to log message received from the Dataplane
-
-        Args:
-            cpu (int): The CPU which has registered the message
-            data (ct.POINTER): The raw structure of the message
-            size (int): The size of the entire message
-        """
-
-        class LogMessage(ct.Structure):
-            """Inner LogMessage class, representing the entire data structure
-
-            Attributes:
-                metadata (Metadata): The metadata of the message
-                level (c_uint64): The log level of the message
-                args (c_uint64 array): Array of maximum 4 variables to format the string
-                content (c_char array): The message string to log
-            """
-            _fields_ = [("metadata", Metadata),
-                        ("level", ct.c_uint64),
-                        ("args", ct.c_uint64 * 4),
-                        ("content", ct.c_char * (size - (ct.sizeof(ct.c_uint16) * 4) - (ct.sizeof(ct.c_uint64) * 4)))]
-
-        # TODO: check and implement LOG LEVEL controls
-        message = ct.cast(data, ct.POINTER(LogMessage)).contents
-        decoded = message.content.decode()
-        args = tuple([message.args[i] for i in range(0, decoded.count('%'))])
-        formatted = decoded % args
-        self.__logger.info(
-            f'DP log message from Probe({message.metadata.probe_id}) CPU({cpu}) '
-            f'PType({message.metadata.ptype}) IfIndex({message.metadata.ifindex}): {formatted}')
-
-    def __parse_packet(self, cpu: int, data: ct.POINTER(ct.c_void_p), size: int):
-        """Method to parse a packet received from the Dataplane
+    def _packet_cp_callback(self, cpu: int, event: Type[ct.Structure], size: int):
+        """Method to forward the packet received from the data plane to the
+        apposite Probe in order to be handled.
 
         Args:
             cpu (int): The CPU which registered the packet
-            data (ct.POINTER): The raw data representing the packet
+            event (Type[ct.Structure]): The event structure automatically converted
             size (int): The size of the entire metadata and packet
         """
+        try:
+            plugin_name = next(itertools.islice(
+                self.__probes.keys(), event.metadata.plugin_id, None))
+            probe_name = next(itertools.islice(
+                self.__probes[plugin_name].keys(), event.metadata.probe_id, None))
+        except Exception:
+            return
+        self.__probes[plugin_name][probe_name].handle_packet_cp(event, cpu)
 
-        class Packet(ct.Structure):
-            """Class representing a packet forwarded to the control plane
-
-            Attributes:
-                metadata (Metadata): The metadata associated to the message
-                raw (c_ubyte array): The raw data as byte array
-            """
-            _fields_ = [("metadata", Metadata),
-                        ("raw", ct.c_ubyte * (size - ct.sizeof(Metadata)))]
-
-        skb_event = ct.cast(data, ct.POINTER(Packet)).contents
-
-        # TODO: forward to probe in order to handle packet
-        # TODO: create a Packet class to simplify parse
-        self.__logger.info(
-            f'CP handle packet from Probe {skb_event.metadata.probe_id} CPU({cpu}) PType({skb_event.metadata.ptype})')
-
-    def __remove_probe_programs(self, conf: Union[ProbeCompilation, SwapStateCompile]):
-        """Method to remove the programs associated to a specific probe
+    def _log_cp_callback(self,
+                         cpu: int,
+                         msg_struct: ct.Structure,
+                         size: int):
+        """Method to forward the message received from the data plane
+        to the apposite Probe in order to be logged.
 
         Args:
-            conf (Union[ProbeCompilation, SwapStateCompile]): The object containing the programs
+            cpu (int): The CPU which has registered the message.
+            msg_struct (ct.Structure): The converted structure according to
+                the one declared in ebpf.py and helpers.h
+            size (int): The size of the entire message.
         """
-        types = ["ingress", "egress"]
-        self.__logger.info('Deleting Probe programs')
-        # Iterating through Ingress-Egress
-        for i, program_type in enumerate(types):
-            if not conf[program_type]:
-                continue
-            program = conf[program_type]
-            # Retrieving the eBPF values given the config parameters
-            mode, mode_map_name, _ = get_bpf_values(program.mode, program_type)
-            next_map_name = f'{program_type}_next_{mode_map_name}'
-            type_of_interest = f'{program_type}_{mode_map_name}'
+        try:
+            plugin_name = next(itertools.islice(
+                self.__probes.keys(), msg_struct.metadata.plugin_id, None))
+            probe_name = next(itertools.islice(
+                self.__probes[plugin_name].keys(), msg_struct.metadata.probe_id, None))
+        except Exception:
+            return
+        self.__probes[plugin_name][probe_name].log_message(msg_struct, cpu)
 
-            target = self.__programs[program.idx][type_of_interest]
-            # TODO: dumb IDs, not safe when deleting a probe in the middle
-            current_probes = len(target)
-            # Checking if only two programs left into the interface, meaning
-            # that also the pivoting has to be removed
-            if current_probes == 2:
-                for x in target:
-                    x.__del__()
-                self.__programs[program.idx][type_of_interest] = []
-                # Checking if also the class act or the entire XDP program can
-                # be removed
-                if not self.__programs[program.idx][f'{types[int(not i)]}_{mode_map_name}']:
-                    if mode == BPF.SCHED_CLS:
-                        self.__ip.tc("del", "clsact", program.idx)
-                    else:
-                        BPF.remove_xdp(program.interface,
-                                       self.__programs[program.idx][0].flags)
-                continue
+    #####################################################################
+    # ---------------- Function to manage plugins --------------------- #
+    #####################################################################
 
-            # Retrieving the index of the Program retrieved
-            index = target.index(program)
-            if index + 1 != current_probes:
-                # The program is not the last one in the list, so
-                # modify program CHAIN in order that the previous program calls the
-                # following one instead of the one to be removed
-                if not target[0][next_map_name][program.probe_id - 1].red_idx:
-                    target[0][next_map_name][program.probe_id - 1] =  \
-                        ct.c_int(target[index + 1].fd)
+    @staticmethod
+    def __check_plugin_exists(plugin_name: str, is_creating: bool = False, update: bool = False):
+        """Static Internal method to check whether a plugin exists or can be created.
+
+        Args:
+            plugin_name (str): The name of the plugin.
+            is_creating (bool, optional): Variable to specify that the plugin needs to be
+                created soon. Defaults to False.
+            update (bool, optional): Variable to specify that the plugin needs to be
+                updated soon. Defaults to False.
+
+        Raises:
+            exceptions.PluginNotFoundException: When the given plugin does not exist.
+            exceptions.PluginAlreadyExistsException: When the given plugin already exist.
+        """
+        target = os.path.join(os.path.dirname(
+            __file__), "plugins", plugin_name)
+        if not is_creating and not os.path.isdir(target):
+            raise exceptions.PluginNotFoundException(
+                "Plugin {} not found".format(plugin_name))
+        if is_creating and os.path.isdir(target):
+            if not update:
+                raise exceptions.PluginAlreadyExistsException(
+                    "Plugin {} already exists".format(plugin_name))
             else:
-                # The program is the last one in the list, so set the previous
-                # program to call the following one which will be empty
-                target[0][next_map_name][program.probe_id - 1] = \
-                    target[0][next_map_name][program.probe_id + 1]
-            del self.__programs[program.idx][type_of_interest][0][next_map_name][program.probe_id]
-            target[index].__del__()
-            del self.__programs[program.idx][type_of_interest][index]
+                shutil.rmtree(target)
 
-    def __inject_pivot(
-            self,
-            mode: int,
-            flags: int,
-            offload_device: str,
-            interface: str,
-            idx: int,
-            program_type: str,
-            mode_map_name: str,
-            parent: str):
-        """Function to inject the pivoting program into a specific interface
+    @staticmethod
+    def check_plugin_validity(plugin_name: str):
+        """Static method to check the validity of a plugin. Validity conditions are:
+        1. in the __init__.py there is a class representing the plugin with the
+            capitalized name of the plugin (e.g., johndoe -> Johndoe);
+        2. such class needs to extend the superclass Probe;
+        3. such class needs to be a dataclass.
 
         Args:
-            mode (int): The mode of the program (XDP or TC)
-            flags (int): The flags to be used in the mode
-            offload_device (str): The device to which offload the program if any
-            interface (str): The desired interface
-            idx (int): The index of the interface
-            program_type (str): The type of the program (Ingress/Egress)
-            mode_map_name (str): The name of the map to use, retrieved from bpf helper function
-            parent (str): The parent interface
+            plugin_name (str, optional): The name of the plugin.
 
+        Raises:
+            exceptions.InvalidPluginException: When one of the validity condition
+                is violated.
         """
-        # Compiling the eBPF program
-        b = BPF(
-            text=get_pivoting_code(
-                mode, program_type), cflags=get_cflags(
-                mode, program_type), debug=False, device=offload_device)
-        f = b.load_func('handler', mode, device=offload_device)
+        with Controller._plugins_lock:
+            plugin = Controller.get_plugin(plugin_name)
+            cls = getattr(plugin, plugin_name.capitalize(), None)
+            if not cls or not issubclass(cls, Probe) or not dataclasses.is_dataclass(cls)\
+                    or not any(x in ["ebpf.c", "ingress.c", "egress.c"] or '.c' in x for x in
+                               os.listdir(os.path.join(os.path.dirname(__file__), "plugins", plugin_name))):
+                Controller.delete_plugin(plugin_name)
+                raise exceptions.InvalidPluginException(
+                    "Plugin {} is not valid".format(plugin_name))
 
-        if mode == BPF.XDP:
-            b.attach_xdp(interface, f, flags=flags)
-        else:
-            # Checking if already created the class act for the interface
-            if not self.__programs[idx][f'ingress_{mode_map_name}'] \
-                    and not self.__programs[idx][f'egress_{mode_map_name}']:
-                self.__ip.tc("add", "clsact", idx)
-            self.__ip.tc("add-filter", "bpf", idx, ':1', fd=f.fd, name=f.name,
-                         parent=parent, classid=1, direct_action=True)
-        self.__programs[idx][f'{program_type}_{mode_map_name}'].append(
-            Program(interface, idx, mode, b, f.fd))
-
-    def __compile(self, config: ProbeConfig, plugin_class: Plugin) -> ProbeCompilation:
-        """Internal Function to compile a probe and inject respective eBPF programs
+    @staticmethod
+    def get_plugin(plugin_name: str = None) -> Union[ModuleType, List[ModuleType]]:
+        """Static method to return the Module of the requested plugin. If the name
+        is not provided, then all the available plugins are loaded and returned.
 
         Args:
-            config (ProbeConfig): The probe configuration
-            plugin_class (Plugin): The Plugin class declaration
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
 
         Returns:
-            ProbeCompilation: A ProbeCompilation object containing the programs and the CP function if any
+            Union[ModuleType, List[ModuleType]]: The list of loaded modules or the
+                target one.
         """
-        ret = ProbeCompilation()
-        self.__logger.info(
-            f'Compiling eBPF program {config.name}({config.plugin_name})')
+        with Controller._plugins_lock:
+            target_dir = os.path.join(os.path.dirname(__file__), "plugins")
+            if not plugin_name:
+                return [x for x in os.listdir(target_dir)
+                        if os.path.isdir(os.path.join(target_dir, x)) and x[0].isalpha()]
+            Controller.__check_plugin_exists(plugin_name)
+            return import_module("{}.plugins.{}".format(__package__, plugin_name))
 
-        # Checking if the interface exists
+    @staticmethod
+    def __download_from_remote_git(dest_path: str, plugin_name: str, git_url: str = None):
+        if not git_url:
+            git_url = "{}/{}.git".format(base_url, plugin_name)
+        os.system("""
+            git init {dest_path};
+            cd {dest_path};
+            git remote add origin {git_url};
+            git config core.sparsecheckout true;
+            echo "{plugin_name}/*" > .git/info/sparse-checkout;
+            git pull origin master;
+            rm -rf .git;
+            """.format(dest_path=dest_path, git_url=git_url, plugin_name=plugin_name))
+
+    @staticmethod
+    def create_plugin(variable: str, update: bool = False):
+        """Static method to create a plugin. Different types are supported:
+        1. local directory: path to a local plugin directory;
+        2. remote custom: URL to the remote repository containing the plugin to pull;
+        3. remote default: the plugin is pulled from the default dechainy_plugin_<name> repo.
+
+        Raises:
+            exceptions.UnknownPluginFormatException: When none of the above formats is provided.
+        """
+        dest_path = os.path.join(os.path.dirname(__file__), "plugins")
+        plugin_name = None
         try:
-            idx = self.__ip.link_lookup(ifname=config.interface)[0]
-        except IndexError:
-            self.__log_and_raise(
-                f'Interface {config.interface} not available',
-                UnknownInterfaceException)
+            with Controller._plugins_lock:
+                if os.path.isdir(variable):  # take from local path
+                    plugin_name = os.path.basename(variable)
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    try:
+                        shutil.copytree(variable, os.path.join(
+                            dest_path, plugin_name))
+                    except Exception as e:
+                        raise exceptions.UnknownPluginFormatException(e)
+                # download from remote custom
+                elif any(variable.startswith(s) for s in ['http:', 'https:']):
+                    if not variable.endswith(".git"):
+                        raise exceptions.UnknownPluginFormatException(
+                            "Not git repo, download the plugin and install it by your own please")
+                    plugin_name = variable.split("/")[-1][:-4]
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    try:
+                        Controller.__download_from_remote_git(
+                            dest_path=dest_path, plugin_name=plugin_name, git_url=variable)
+                    except Exception as e:
+                        raise exceptions.UnknownPluginFormatException(e)
+                # download from remote default
+                elif ''.join(ch for ch in variable if ch.isalnum()) == variable:
+                    plugin_name = variable
+                    Controller.__check_plugin_exists(
+                        plugin_name, is_creating=True, update=update)
+                    try:
+                        Controller.__download_from_remote_git(
+                            dest_path=dest_path, plugin_name=plugin_name)
+                    except Exception as e:
+                        raise exceptions.UnknownPluginFormatException(e)
+                else:
+                    raise exceptions.UnknownPluginFormatException(
+                        "Unable to handle input {}".format(variable))
+                Controller.check_plugin_validity(plugin_name)
+        except Exception as e:
+            if plugin_name and os.path.isdir(os.path.join(dest_path, plugin_name)):
+                shutil.rmtree(os.path.join(dest_path, plugin_name))
+            raise e
+        Controller._logger.info("Created Plugin {}".format(plugin_name))
 
-        # For ingress-egress
-        for program_type in ["ingress", "egress"]:
-            # If not specified hook for the program type skip
-            if not config[program_type]:
-                ret[program_type] = None
-                continue
+    @staticmethod
+    def delete_plugin(plugin_name: str = None):
+        """Static method to delete a plugin. If the name is not specified,
+        then all the plugins are deleted.
 
-            # Retrieve eBPF values given Mode and program type
-            mode, flags, offload_device, mode_map_name, parent = get_bpf_values(
-                config.mode, config.flags, config.interface, program_type)
-            map_of_interest = f'{program_type}_{mode_map_name}'
+        Args:
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
 
-            # Checking if the interface has already been used so there's already
-            # Holder structure
-            if idx not in self.__programs:
-                self.__programs[idx] = InterfaceHolder(
-                    config.interface, flags, offload_device)
-            elif program_type == "ingress":
-                flags, offload_device = self.__programs[idx].flags, self.__programs[idx].offload_device
+        Raises:
+            exceptions.PluginNotFoundException: When the plugin does not exist.
+        """
+        with Controller._plugins_lock:
+            if plugin_name:
+                Controller.__check_plugin_exists(plugin_name)
+                shutil.rmtree(os.path.join(os.path.dirname(
+                    __file__), "plugins", plugin_name))
+            else:
+                for plugin_name in Controller.get_plugin():
+                    shutil.rmtree(os.path.join(os.path.dirname(
+                        __file__), "plugins", plugin_name))
+        Controller._logger.info("Deleted Plugin {}".format(plugin_name))
 
-            # If the array representing the hook is empty, inject the pivot code
-            if not self.__programs[idx][map_of_interest]:
-                self.__inject_pivot(mode, flags, offload_device, config.interface,
-                                    idx, program_type, mode_map_name, parent)
+    #####################################################################
+    # ------------------ Function to manage probes -------------------- #
+    #####################################################################
 
-            self.__logger.info(
-                f'Attaching program {config.name} to chain {program_type}, '
-                f'interface {config.interface}, mode {mode_map_name}')
-            current_probes = len(self.__programs[idx][map_of_interest])
+    def delete_probe(self, plugin_name: str = None, probe_name: str = None):
+        """Method to delete probes. If the plugin name is not specified, then
+        all the probes deployed are deleted. Otherwise, all the probes belonging
+        to that plugins are deleted, or the target one if also the probe name
+        is specified.
 
-            original_code, swap_code, features = config[program_type], None, {}
-            if plugin_class.is_programmable():
-                original_code, swap_code, features = precompile_parse(
-                    config[program_type])
+        Args:
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
+            probe_name (str, optional): The name of the probe. Defaults to None.
 
-            cflags = plugin_class.get_cflags(config) + config.cflags + \
-                get_cflags(mode, program_type,
-                           current_probes, config.log_level)
+        Raises:
+            exceptions.ProbeNotFoundException: When the probe does not exist
+            exceptions.PluginNotFoundException: When the plugin does not exist.
+        """
+        with self.__probes_lock:
+            if not plugin_name:
+                if not self.__probes:
+                    raise exceptions.ProbeNotFoundException(
+                        "No probes to delete")
+                self.__probes.clear()
+                Controller._logger.info('Successfully deleted all probes')
+                return
 
-            red_idx = None
-            if config.redirect and program_type == "ingress":
-                red_idx = self.__ip.link_lookup(ifname=config.redirect)[0]
-                cflags.append("-DNEED_REDIRECT=1")
-                if red_idx not in self.__programs:
-                    self.__programs[red_idx] = InterfaceHolder(
-                        config.redirect, flags, offload_device)
-                    self.__inject_pivot(
-                        mode, flags, offload_device, config.redirect, red_idx, program_type, mode_map_name, parent)
-                # TODO: Next instruction when needed? It always calls bpf_redirect...
-                self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'][current_probes] = \
-                    ct.c_int(self.__programs[red_idx][map_of_interest][0].fd)
+            Controller.__check_plugin_exists(plugin_name)
+            if plugin_name not in self.__probes:
+                raise exceptions.ProbeNotFoundException(
+                    "No probes to delete for plugin {}".format(plugin_name))
 
-            # Compiling BPF given the formatted code, CFLAGS for the current Mode and CFLAGS
-            # for the specific Plugin class if any
-            b = BPF(
-                text=get_formatted_code(
-                    mode,
-                    program_type,
-                    original_code),
-                debug=config.debug,
-                cflags=cflags,
-                device=offload_device)
+            if not probe_name:
+                del self.__probes[plugin_name]
+                Controller._logger.info(
+                    f'Successfully deleted probes of Plugin {plugin_name}')
+                return
 
-            # Loading compiled "internal_handler" function and set the previous
-            # plugin program to call in the CHAIN to the current function descriptor
-            p = Program(config.interface, idx, mode, b,
-                        b.load_func('internal_handler', mode,
-                                    device=offload_device).fd,
-                        current_probes, red_idx, features)
-            ret[program_type] = p
+            if probe_name not in self.__probes[plugin_name]:
+                raise exceptions.ProbeNotFoundException(
+                    "Probe {} of plugin {} not found".format(probe_name, plugin_name))
 
-            # Updating Service Chain
-            if current_probes - 1 not in self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}']:
-                self.__programs[idx][map_of_interest][0][
-                    f'{program_type}_next_{mode_map_name}'][current_probes - 1] = ct.c_int(p.fd)
+            del self.__probes[plugin_name][probe_name]
 
-            # Compiling swap program if needed
-            if swap_code:
-                b1 = BPF(text=get_formatted_code(mode, program_type, swap_code),
-                         debug=config.debug,
-                         cflags=cflags,
-                         device=offload_device)
-                p1 = Program(config.interface, idx, mode, b1,
-                             b1.load_func('internal_handler', mode,
-                                          device=offload_device).fd,
-                             current_probes, red_idx, features)
-                ret[program_type] = SwapStateCompile(
-                    [p, p1], self.__programs[idx][map_of_interest][0][f'{program_type}_next_{mode_map_name}'])
-            # Append the main program to the list of programs
-            self.__programs[idx][map_of_interest].append(ret[program_type])
-        return ret
+            if not self.__probes[plugin_name]:
+                del self.__probes[plugin_name]
+
+            Controller._logger.info(
+                f'Successfully deleted Probe {probe_name} for Plugin {plugin_name}')
+
+    def create_probe(self, plugin_name: str, probe_name: str, **kwargs):
+        """Method to create the given probe.
+
+        Args:
+            probe (Probe): The probe to be created.
+
+        Raises:
+            exceptions.PluginNotFoundException: When the plugin does not exist.
+            exceptions.ProbeAlreadyExistsException: When a probe of the same plugin
+                and having the same name already exists.
+        """
+        module = Controller.get_plugin(plugin_name)
+        with self.__probes_lock:
+            if plugin_name not in self.__probes:
+                self.__probes[plugin_name] = {}
+            if probe_name in self.__probes[plugin_name]:
+                raise exceptions.ProbeAlreadyExistsException(
+                    'Probe {} for Plugin {} already exist'.format(probe_name, plugin_name))
+            self.__probes[plugin_name][probe_name] = getattr(module, plugin_name.capitalize())(
+                name=probe_name, plugin_id=list(
+                    self.__probes.keys()).index(plugin_name),
+                probe_id=len(self.__probes[plugin_name]), **kwargs)
+            Controller._logger.info(
+                f'Successfully created Probe {probe_name} for Plugin {plugin_name}')
+
+    def get_probe(self, plugin_name: str = None, probe_name: str = None)\
+            -> Union[Dict[str, Dict[str, Type[Probe]]], Dict[str, Type[Probe]], Type[Probe]]:
+        """Function to retrieve probes. If the plugin name is not specified, then
+        all the probes deployed in the system are returned. Otherwise return all the probes belonging
+        to that plugin, or just the target one if also the probe name is specified.
+
+        Args:
+            plugin_name (str, optional): The name of the plugin. Defaults to None.
+            probe_name (str, optional): The name of the probe. Defaults to None.
+
+        Raises:
+            exceptions.ProbeNotFoundException: The requested probe has not been found.
+            exceptions.PluginNotFoundException: The requested plugin has not been found.
+
+        Returns:
+            Union[Dict[str, Dict[str, Type[Probe]]], Dict[str, Type[Probe]], Type[Probe]]: The Dictionary of all
+                probes, or the dictionary of probes of a specific plugin, or the target probe.
+        """
+        with self.__probes_lock:
+            if not plugin_name:
+                return self.__probes
+            if plugin_name not in self.__probes or (probe_name and probe_name not in self.__probes[plugin_name]):
+                Controller.__check_plugin_exists(plugin_name)
+                if not probe_name:
+                    return {}
+                raise exceptions.ProbeNotFoundException(
+                    'Probe {} for Plugin {} not found'.format(probe_name, plugin_name))
+            return self.__probes[plugin_name] if not probe_name else self.__probes[plugin_name][probe_name]
+
+    def sync_plugin_probes(self, plugin_name: str):
+        """Method to remove all the probes belonging to the deleted plugin, if any.
+
+        Args:
+            plugin_name (str): The name of the plugin deleted.
+        """
+        with self.__probes_lock:
+            if plugin_name not in self.__probes:
+                return
+            if not self.__probes[plugin_name]:
+                del self.__probes[plugin_name]
+                return
+            try:
+                Controller.__check_plugin_exists(plugin_name)
+            except exceptions.PluginNotFoundException:
+                Controller._logger.info(
+                    "Found Probes of deleted Plugin {}".format(plugin_name))
+                self.delete_probe(plugin_name)

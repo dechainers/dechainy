@@ -1,13 +1,15 @@
-![Docker Image Test](https://github.com/s41m0n/dechainy/workflows/Docker%20Image%20Test/badge.svg)
-![Check linting](https://github.com/s41m0n/dechainy/workflows/Check%20linting/badge.svg)
-![Release](https://github.com/s41m0n/dechainy/workflows/Release/badge.svg)
-![API Doc autogen](https://github.com/s41m0n/dechainy/workflows/API%20Doc%20autogen/badge.svg)
+![Docker Image Test](https://github.com/dechainers/dechainy/workflows/Docker%20Image%20Test/badge.svg)
+![Check linting](https://github.com/dechainers/dechainy/workflows/Check%20linting/badge.svg)
+![Release](https://github.com/dechainers/dechainy/workflows/Release/badge.svg)
+![API Doc autogen](https://github.com/dechainers/dechainy/workflows/API%20Doc%20autogen/badge.svg)
 
-![DeChainy Logo](docs/dechainy-logo.png)
+![DeChainy Logo](https://github.com/dechainers/dechainy/blob/master/docs/logo.png?raw=true)
 
 # DeChainy
 
 An open source framework to easily build and deploy eBPF/XDP network monitoring probes and clusters of probes, in order to perform Service Programs Chain efficiently. This framework is supposed to help and ease life to both new eBPD/XDP users, and to the ones who need to customize more their programs. DeChainy is not supposed to substitute already existent framework; on the other hand, its aim is to offer a wider choice of possibilities for also those users who are experimenting eBPF with other Python-friendly technologies, like TensorFlow (for Machine Learning).
+
+If you like this project, you can [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_SM.gif)](https://paypal.me/simomagno96?country.x=IT&locale.x=it_IT) via PayPal.
 
 ## Quick links
 
@@ -17,7 +19,6 @@ Here follows a list of useful guides:
 * [Installation guide](docs/installation.md)
 * [User Manual](docs/reference_guide.md)
 * [Developer Manual](docs/developers.md)
-* [Tutorial](docs/tutorial.md)
 * [API Doc](docs/api)
 * [FAQ](docs/faq.md)
 

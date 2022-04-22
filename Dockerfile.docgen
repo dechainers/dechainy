@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ FROM ubuntu:18.04 as builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && \
-    apt-get -y install pbuilder aptitude && \
+RUN apt update -y && \
+    apt -y install pbuilder aptitude && \
     cd /root && \
     git clone https://github.com/iovisor/bcc.git
 
@@ -56,12 +56,4 @@ RUN \
   apt clean && \
   apt autoremove
 
-CMD exec pdoc3 dechainy/ -o /docs/api
-
-#######################
-# docker run --rm -it --privileged --network host -v /lib/modules:/lib/modules:ro \
-#   -v /usr/src:/usr/src:ro \
-#   -v /etc/localtime:/etc/localtime:ro \
-#   -v /tmp:/tmp:rw \
-#   s41m0n/dechainy:docgen
-#######################
+CMD ["pdoc3", "dechainy/", "-o /docs/api"]

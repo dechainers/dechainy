@@ -1,3 +1,2 @@
-flask==1.1.2
 pyroute2==0.5.9
-setproctitle==1.2.2
+watchdog==2.1.6

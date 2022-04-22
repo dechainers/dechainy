@@ -1,4 +1,4 @@
-# Copyright 2020 DeChainy
+# Copyright 2022 DeChainers
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,248 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import time
+import atexit
 import ctypes as ct
+import logging
+import os
+import platform
+import threading
+import time
+import weakref
+from dataclasses import dataclass, field
+from re import MULTILINE, finditer, sub
+from threading import RLock
+from typing import Callable, ClassVar, Dict, List, Tuple, Union
 
-from os.path import dirname
-from re import finditer, MULTILINE
-from subprocess import run, PIPE
-from typing import Dict, List, Tuple, Union
-from atexit import unregister
-from types import ModuleType
-
-from bcc import BPF
+from bcc import BPF, XDPFlags
 from bcc.table import QueueStack, TableBase
+from pyroute2 import IPRoute
+from pyroute2.netlink.exceptions import NetlinkError
 
-from .utility import remove_c_comments, Dict as Dict_
-from .configurations import DPLogLevel, MetricFeatures
-
-
-class Metadata(ct.Structure):
-    """C struct representing the pkt_metadata structure in Data Plane programs
-
-    Attributes:
-        ifindex (c_uint32): The interface on which the packet was received
-        ptype (c_uint32): The program type ingress/egress
-        probe_id (c_uint64): The ID of the probe
-    """
-    _fields_ = [("ifindex", ct.c_uint32),
-                ("ptype", ct.c_uint32),
-                ("probe_id", ct.c_uint64)]
-
-
-class LpmKey(ct.Structure):
-    """C struct representing the LPM_KEY
-
-    Attributes:
-        netmask_len (c_uint32): the length of the netmask
-        ip (c_uint32): the ip specified
-    """
-    _fields_ = [("netmask_len", ct.c_uint32),
-                ("ip", ct.c_uint32)]
-
-
-class Program:
-    """Program class to handle both useful information and BPF program.
-
-    Args:
-        interface (str): The interface to attach the program to
-        idx (int): The interface's index, retrieved using IPDB
-        mode (int): The program mode (XDP or TC)
-        bpf (BPF): The eBPF compiled program
-        fd (int, optional): The file descriptor of the main function in the program. Defaults to None.
-        probe_id (int, optional): The ID of the probe. Defaults to 0.
-        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
-
-    Attributes:
-        interface (str): The interface to attach the program to
-        idx (int): The interface's index, retrieved using IPDB
-        mode (int): The program mode (XDP or TC)
-        bpf (BPF): The eBPF compiled program
-        fd (int): The file descriptor of the main function in the program. Defaults to None.
-        probe_id (int): The ID of the probe. Defaults to 0.
-        red_idx (int): Index of the interface packets are redirect, if needed
-        is_destroyed (bool): Boolean value set to True when the instance is destroyed
-        features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
-    """
-
-    def __init__(
-            self,
-            interface: str,
-            idx: int,
-            mode: int,
-            bpf: BPF,
-            fd: int = None,
-            probe_id: int = 0,
-            red_idx: int = 0,
-            features: Dict[str, MetricFeatures] = {}):
-        self.interface = interface
-        self.idx = idx
-        self.mode = mode
-        self.fd = fd
-        self.probe_id = probe_id
-        self.red_idx = red_idx
-        self.bpf = bpf
-        self.features = features
-        self.__is_destroyed = False
-        if red_idx:
-            self.bpf["DEVMAP"][ct.c_uint32(0)] = ct.c_int(red_idx)
-
-    def __del__(self):
-        if self.__is_destroyed:
-            return
-        # Calling the BCC defined cleanup function which would have been
-        # called while exitting
-        self.__is_destroyed = True
-        unregister(self.bpf.cleanup)
-        self.bpf.cleanup()
-        del self.bpf
-
-    def __getitem__(self, key: str) -> Union[QueueStack, TableBase]:
-        """Function to access directly the BPF map providing a key
-
-        Args:
-            key (str): The name of the map
-
-        Returns:
-            Union[QueueStack, TableBase]: The eBPF map requested
-        """
-        return self.bpf[key] if not self.__is_destroyed else exit(1)
-
-
-class SwapStateCompile:
-    """Class storing the state of a program when the SWAP of at least 1 map is required.
-
-    Args:
-        programs (List[Program]): The list of the two compiled programs
-        pivot (Program): The pivoting eBPF program compiled
-
-    Attributes:
-        maps (List[str]): The maps defined as swappable
-        index (int): The index of the current active program
-        programs (List[Program]): The list containing the two programs compiled
-        chain_map (TableBase): The eBPF table performing the chain
-        programs_id (int): The probe ID of the programs
-        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
-    """
-
-    def __init__(self, programs: List[Program], chain_map: TableBase):
-        self.__is_destroyed = False
-        self.__index: int = 0
-        self.__programs: List[Program] = programs
-        self.__chain_map: TableBase = chain_map
-        self.__programs_id: int = programs[0].probe_id
-        self.features: Dict[str, MetricFeatures] = programs[0].features
-
-    def __del__(self):
-        if self.__is_destroyed:
-            return
-        self.__is_destroyed = True
-        del self.__programs[0]
-        del self.__programs[1]
-        self.__programs = []
-
-    def trigger_read(self):
-        """Method to trigger the read of the maps, meaning to swap in and out the programs"""
-        if self.__is_destroyed:
-            exit(1)
-        self.__index = (self.__index + 1) % 2
-        self.__chain_map[self.__programs_id-1] = ct.c_int(
-            self.__programs[self.__index].fd)
-
-    def __getitem__(self, key: any) -> any:
-        """Method to read from a swapped-out program map the value, given the key
-
-        Args:
-            key (any): The key to be searched in the map
-
-        Returns:
-            any: The value corresponding to the provided key
-        """
-        if self.__is_destroyed:
-            exit(1)
-        index_to_read = int(not self.__index)
-        if index_to_read == 1 and key in self.features:
-            key += "_1"
-        return self.__programs[index_to_read][key]
-
-
-class ProbeCompilation(Dict_):
-    """Class representing the compilation object of a Probe
-
-    Attributes:
-        cp_function (ModuleType): The module containing the optional Controlplane functions
-        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
-        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.cp_function: ModuleType = None
-        self.ingress: Union[Program, SwapStateCompile] = None
-        self.egress: Union[Program, SwapStateCompile] = None
-
-
-class ClusterCompilation(Dict_):
-    """Class to represent a compilation of a Cluster object.
-
-    Attributes:
-        key (str): The name of the plugin
-        value (List[Plugin]): List of probes for that specific plugin
-    """
-    pass
-
-
-class InterfaceHolder(Dict_):
-    """Simple class to store information concerning the programs attached to an interface
-
-    Attributes:
-        name (str): The name of the interface
-        flags (int): The flags used in injection
-        offload_device (str): The name of the device to which offload the program if any
-        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
-        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
-        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
-        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
-    """
-
-    def __init__(self, name: str, flags: int, offload_device: str):
-        super().__init__()
-        self.name: str = name
-        self.flags = flags
-        self.offload_device = offload_device
-        self.ingress_xdp: List[Program] = []
-        self.ingress_tc: List[Program] = []
-        self.egress_tc: List[Program] = []
-        self.egress_xdp: List[Program] = []
-
-
-# Computing EPOCH BASE time from uptime, to synchronize bpf_ktime_get_ns()
-with open('/proc/uptime', 'r') as f:
-    __EPOCH_BASE = int(
-        (int(time.time() * 10**9) - int(float(f.readline().split()[0]) * (10 ** 9))))
-
-__base_dir = f'{dirname(__file__)}/sourcebpf/management'
-
-# Variable to store startup code, containing the log buffer perf event map
-with open(f'{__base_dir}/startup.h', 'r') as fp:
-    __STARTUP = remove_c_comments(fp.read())
-
-# Variable to store Pivoting code for all modes and perform chain
-with open(f'{__base_dir}/pivoting.c', 'r') as fp:
-    __PIVOTING_CODE = remove_c_comments(fp.read())
-
-# Variable to store wrapper code for TC probes, to perform chain
-with open(f'{__base_dir}/wrapper.c', 'r') as fp:
-    __WRAPPER_CODE = remove_c_comments(fp.read())
-
-# Variable to store all functions and parameters useful in all programs
-with open(f'{__base_dir}/helpers.h', 'r') as fp:
-    __HELPERS = remove_c_comments(fp.read())
-
-
-# Variable to specify whether batch ops are supported (kernel >= v5.6)
-__is_batch_supp = None
+from . import exceptions
+from .utility import Singleton, get_logger, remove_c_comments
 
 ########################################################################
 #   #NOTE: generic/SKB (xdpgeneric), native/driver (xdp), and hardware offload (xdpoffload)
@@ -265,204 +43,821 @@ BPF.TC_ACT_SHOT = 2
 BPF.TC_REDIRECT = 10
 BPF.TC_STRUCT = '__sk_buff'
 BPF.XDP_STRUCT = 'xdp_md'
-__PARENT_INGRESS_TC = 'ffff:fff2'
-__PARENT_EGRESS_TC = 'ffff:fff3'
-__XDP_MAP_SUFFIX = 'xdp'
-__TC_MAP_SUFFIX = 'tc'
-__MAX_PROGRAMS_PER_HOOK = 32
-
-__TC_CFLAGS = [
-    f'-DCTXTYPE={BPF.TC_STRUCT}',
-    f'-DPASS={BPF.TC_ACT_OK}',
-    f'-DDROP={BPF.TC_ACT_SHOT}',
-    f'-DREDIRECT={BPF.TC_REDIRECT}']
-
-__XDP_CFLAGS = [
-    f'-DCTXTYPE={BPF.XDP_STRUCT}',
-    f'-DBACK_TX={BPF.XDP_TX}',
-    f'-DPASS={BPF.XDP_PASS}',
-    f'-DDROP={BPF.XDP_DROP}',
-    f'-DREDIRECT={BPF.XDP_REDIRECT}',
-    '-DXDP=1']
-
-__DEFAULT_CFLAGS = [
-    "-w",
-    f'-DMAX_PROGRAMS_PER_HOOK={__MAX_PROGRAMS_PER_HOOK}',
-    f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x.name}={x.value}' for x in list(DPLogLevel)]
+BPF._MAX_PROGRAMS_PER_HOOK = 32
 
 
-def get_startup_code() -> str:
-    """Function to return the startup code for the entire framework
-
-    Returns:
-        str: The startup code
+class Metadata(ct.Structure):
+    """C struct representing the pkt_metadata structure in Data Plane programs
+    Attributes:
+        ifindex (c_uint32): The interface on which the packet was received
+        ptype (c_uint32): The program type ingress/egress
+        probe_id (c_uint64): The ID of the probe
     """
-    return __STARTUP
+
+    _fields_ = [("ifindex", ct.c_uint32),
+                ("length", ct.c_uint32),
+                ("ingress", ct.c_uint8),
+                ("xdp", ct.c_uint8),
+                ("program_id", ct.c_uint16),
+                ("plugin_id", ct.c_uint16),
+                ("probe_id", ct.c_uint16)]
 
 
-def get_pivoting_code(mode: int, program_type: str) -> str:
-    """Function to return the pivoting code according to ingress/egress and TC/XDP
+@dataclass
+class MetricFeatures:
+    """Class to represent all the possible features for an Adaptmon metric
 
-    Args:
+    Attributes:
+        swap(bool): True if the metric requires swapping programs, False otherwise
+        empty(bool): True if the metric needs to be emptied, False otherwise
+        export(bool): True if the metric needs to be exported, False otherwise
+    """
+    swap: bool = False
+    empty: bool = False
+    export: bool = False
+
+
+@dataclass
+class Program:
+    """Program class to handle both useful information and BPF program.
+
+    Attributes:
+        interface (str): The interface to attach the program to
+        idx (int): The interface's index, retrieved using IPDB
         mode (int): The program mode (XDP or TC)
-        program_type (str): The program hook (ingress/egress)
-
-    Returns:
-        str: The pivoting code for the hook
+        flags (int): The flags used for injecting the program.
+        code (str): The source code.
+        program_id (int): The ID of the program.
+        debug (bool): True if the program is compiled with debug info. Default to False.
+        cflags (List[str]): List of cflags for the program. Default to [].
+        features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
+        offload_device (str): Device used for offloading the program. Default to None
+        bpf (BPF): The eBPF compiled program
+        f (BPF.Function): The function loaded from the program injected in the chain.
     """
-    ret = __PIVOTING_CODE.replace('PROGRAM_TYPE', program_type)
-    if mode == BPF.SCHED_CLS or program_type == "egress":
-        return ret.replace('MODE', __TC_MAP_SUFFIX)
-    return ret.replace('MODE', __XDP_MAP_SUFFIX)
+
+    interface: str
+    idx: int
+    mode: int
+    flags: int
+    code: str
+    program_id: int
+    probe_id: int
+    plugin_id: int
+    debug: bool = False
+    cflags: List[str] = field(default_factory=list)
+    features: Dict[str, MetricFeatures] = field(default_factory=dict)
+    offload_device: str = None
+
+    bpf: BPF = field(init=False)
+    f: BPF.Function = field(init=False)
+
+    def __post_init__(self):
+        self.bpf: BPF = BPF(text=self.code, debug=self.debug,
+                            cflags=self.cflags, device=self.offload_device)
+        self.f: BPF.Function = self.bpf.load_func(
+            'internal_handler', self.mode, device=self.offload_device)
+        atexit.unregister(self.bpf.cleanup)
+
+    def __del__(self):
+        """Method to clear resources deployed in the system"""
+        # Calling the BCC defined cleanup function which would have been called while exitting
+        self.bpf.cleanup()
+        del self.bpf
+        del self.f
+
+    def trigger_read(self):
+        pass
+
+    def __getitem__(self, key: str) -> Union[QueueStack, TableBase]:
+        """Method to access directly the BPF map providing a key.
+
+        Args:
+            key (str): The name of the map.
+
+        Returns:
+            Union[QueueStack, TableBase]: The eBPF map requested.
+        """
+        return self.bpf[key]
 
 
-def get_formatted_code(
-        mode: int,
-        program_type: str,
-        code: str) -> str:
-    """Function to return the probe wrapper code according to ingress/egress, TC/XDP, and substitute dp_log function
+@dataclass
+class SwapStateCompile(Program):
+    """Class storing the state of a program when the SWAP of at least 1 map is required.
 
-    Args:
-        mode (int): The program mode (XDP or TC)
-        program_type (str): The program hook (ingress/egress)
-        code (str, optional): The code to be formatted
-
-    Returns:
-        str: The code formatted accordingly
+    Attributes:
+        index (int): The index of the current active program
+        _programs (List[Program]): The list containing the two programs compiled.
+        chain_map (TableBase): The eBPF table performing the chain.
+        program_id (int): The ID of the programs.
+        mode (int): The mode used for injecting eBPF programs.
+        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
     """
-    if not code:
-        return ''
-    # Removing C-like comments
-    code = remove_c_comments(code)
-    # Finding dp_log function invocations if any, and reverse to avoid bad
-    # indexes while updating
-    matches = [(m.start(), m.end())
-               for m in finditer('dp_log.*;', code)]
-    matches.reverse()
-    for start, end in matches:
-        # Getting the log level specified
-        log_level = code[start + 7: end].split(",")[0]
-        # Substitute the dp_log invocation (length 6 characters) with the right
-        # logging function
-        code = code[:start] \
-            + f'if ({log_level} <= LOG_LEVEL)' \
-            + '{LOG_STRUCT' \
-            + code[start + 6:end] \
-            + 'log_buffer.perf_submit(ctx, &msg_struct, sizeof(msg_struct));}' \
-            + code[end:]
-    return __HELPERS + __WRAPPER_CODE .replace(
-        'PROGRAM_TYPE',
-        program_type) .replace(
-        'MODE',
-        __TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress" else __XDP_MAP_SUFFIX) + code
+    chain_map: str = None
+    code_1: str = None
+
+    bpf_1: BPF = field(init=False)
+    f_1: BPF.Function = field(init=False)
+    index: int = 0
+
+    def __post_init__(self):
+        if not self.chain_map or not self.code_1:
+            raise Exception(
+                "Unable to build SwapStateConfig without all attributes")
+        super().__post_init__()
+        self.bpf_1: BPF = BPF(text=self.code_1, debug=self.debug,
+                              cflags=self.cflags, device=self.offload_device)
+        self.f_1: BPF.Function = self.bpf_1.load_func(
+            'internal_handler', self.mode, device=self.offload_device)
+        atexit.unregister(self.bpf_1.cleanup)
+
+    def __del__(self):
+        """Method to clear resoruces deployed in the system"""
+        super().__del__()
+        self.bpf_1.cleanup()
+        del self.bpf_1
+        del self.f_1
+
+    def trigger_read(self):
+        """Method to trigger the read of the maps, meaning to swap in and out the programs"""
+        self.index = (self.index + 1) % 2
+        self.bpf[self.chain_map][self.program_id -
+                                 1] = ct.c_int(self.f.fd if self.index == 0 else self.f_1.fd)
+
+    def __getitem__(self, key: any) -> any:
+        """Method to read from a swapped-out program map the value, given the key
+
+        Args:
+            key (any): The key to be searched in the map
+
+        Returns:
+            any: The value corresponding to the provided key
+        """
+        index_to_read = int(not self.index)
+        if isinstance(key, tuple):
+            if bool(key[1]):
+                index_to_read = self.index
+            key = key[0]
+
+        if index_to_read == 0 or key not in self.features or not self.features[key].swap:
+            return self.bpf[key]
+
+        return self.bpf_1["{}_1".format(key)]
 
 
-def get_bpf_values(mode: int, flags: int, interface: str, program_type: str) -> Tuple[int, int, str, str, str]:
-    """Function to return BPF map values according to ingress/egress and TC/XDP
+@dataclass
+class HookTypeHolder:
+    """Class to hold current programs and free IDs available for a specific hook of an interface.
 
-    Args:
-        mode (int): The program mode (XDP or TC)
-        flags (int): Flags to be used in the mode
-        interface (str): The interface to which attach the program
-        program_type (str): The program hook (ingress/egress)
-
-    Returns:
-        Tuple[int, int, str str, str]: The values representing the mode, the suffix for maps names and parent interface
+    Attributes:
+        programs (List[Program]): List of eBPF program injected.
+        ids (List[int]): List of available IDs to be used for new programs.
+        lock (RLock): Lock for the hook.
     """
-    if program_type == "egress":
-        return BPF.SCHED_CLS, 0, None, __TC_MAP_SUFFIX, __PARENT_EGRESS_TC
-    if mode == BPF.SCHED_CLS:
-        return BPF.SCHED_CLS, 0, None, __TC_MAP_SUFFIX, __PARENT_INGRESS_TC
-    return BPF.XDP, flags, interface if flags == (1 << 3) else None, __XDP_MAP_SUFFIX, None
+    programs: List[Union[SwapStateCompile, Program]
+                   ] = field(default_factory=list)
+    ids: List[int] = field(default_factory=lambda: list(
+        range(1, BPF._MAX_PROGRAMS_PER_HOOK)))
+
+    def __post_init__(self):
+        self.lock: RLock = RLock()
 
 
-def get_cflags(
-        mode: int,
-        program_type: str,
-        probe_id: int = 0,
-        log_level: int = DPLogLevel.LOG_INFO.value) -> List[str]:
-    """Function to return CFLAGS according to ingress/egress and TC/XDP
+@dataclass
+class InterfaceHolder:
+    """Simple class to store information concerning the programs attached to an interface.
 
-    Args:
-        mode (int): The program mode (XDP or TC)
-        program_type (str): The hook of the program (ingress/egress)
-        probe_id (int, optional): The ID of the probe to be created. Defaults to 0.
-        log_level (int, optional): The Log Level of the probe. Defaults to DPLogLevel.LOG_INFO.
-
-    Returns:
-        List[str]: The list of computed cflags
+    Attributes:
+        name (str): The name of the interface.
+        flags (int): The flags used in injection.
+        offload_device (str): The name of the device to which offload the program if any.
+        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode.
+        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode.
+        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode.
+        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode.
     """
-    return [f'-DPROBE_ID={probe_id}', f'-DPTYPE={0 if program_type == "ingress" else 1}', f'-DLOG_LEVEL={log_level}'] \
-        + __DEFAULT_CFLAGS \
-        + (__TC_CFLAGS if mode == BPF.SCHED_CLS else __XDP_CFLAGS)
+    name: str
+    flags: int
+    offload_device: str
+    ingress_xdp: HookTypeHolder = field(
+        default_factory=HookTypeHolder)
+    ingress_tc: HookTypeHolder = field(
+        default_factory=HookTypeHolder)
+    egress_xdp: HookTypeHolder = field(
+        default_factory=HookTypeHolder)
+    egress_tc: HookTypeHolder = field(default_factory=HookTypeHolder)
 
 
-def precompile_parse(original_code: str) -> Tuple[str, str, Dict[str, MetricFeatures]]:
-    """Function to compile additional functionalities from original code (swap, erase, and more)
+class EbpfCompiler(metaclass=Singleton):
+    """Class (Singleton) to handle eBPF programs compilation, injection, and deletion.
 
-    Args:
-        original_code (str): The original code to be controlled
+    Static Attributes:
+    __logger (logging.Logger): The instance logger.
+    __is_batch_supp (bool): True if batch operations are supported. Default to None.
+    __base_dir (str): Path to the sourcebpf folder, where there are source eBPF codes.
+    __PARENT_INGRESS_TC (str): Address of the parent ingress hook in TC.
+    __PARENT_EGRESS_TC (str): Address of the parent egress hook in TC.
+    __XDP_MAP_SUFFIX (str): Suffix used for eBPF maps in XDP mode.
+    __TC_MAP_SUFFIX (str):Suffix used for eBPF maps in TC mode.
+    __EPOCH_BASE (int): Base timestamp to compute UNIX timestamps in eBPF programs.
+    __TC_CFLAGS (List[str]): List of cflags to be used in TC mode.
+    __XDP_CFLAGS (List[str]): List of cflags to be used in XDP mode.
+    __DEFAULT_CFLAGS (List[str]): List of default cflags.
 
-    Returns:
-        Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps,
-            else the tuple containing also swap code and list of metrics configuration
+    Attributes:
+        __startup (BPF): Startup eBPF program, where logging and control plane buffers are declared.
+        __interfaces_programs: Dictionary holding for each interface the list of programs
+            and attributes to be used.
     """
-    # Find map declarations, from the end to the beginning
-    declarations = [(m.start(), m.end(), m.group()) for m in finditer(
-        r"^(BPF_TABLE|BPF_QUEUESTACK).*$", original_code, MULTILINE)]
-    declarations.reverse()
+    __logger: ClassVar[logging.Logger] = get_logger("EbpfCompiler")
+    __is_batch_supp: ClassVar[bool] = None
+    __base_dir: ClassVar[str] = os.path.join(
+        os.path.dirname(__file__), "sourcebpf")
+    __PARENT_INGRESS_TC: ClassVar[str] = 'ffff:fff2'
+    __PARENT_EGRESS_TC: ClassVar[str] = 'ffff:fff3'
+    __XDP_MAP_SUFFIX: ClassVar[str] = 'xdp'
+    __TC_MAP_SUFFIX: ClassVar[str] = 'tc'
+    __EPOCH_BASE: ClassVar[int] = int((time.time() - time.monotonic()) * 10**9)
 
-    # Check if at least one map needs swap
-    need_swap = any(x for _, _, x in declarations if "__attributes__" in x and "SWAP" in x.split(
-        "__attributes__")[1])
-    cloned_code = original_code if need_swap else None
+    __TC_CFLAGS: ClassVar[List[str]] = [
+        f'-DCTXTYPE={BPF.TC_STRUCT}',
+        f'-DPASS={BPF.TC_ACT_OK}',
+        f'-DDROP={BPF.TC_ACT_SHOT}',
+        f'-DREDIRECT={BPF.TC_REDIRECT}',
+        '-DXDP=0']
 
-    maps = {}
-    for start, end, declaration in declarations:
-        new_decl, splitted = declaration, declaration.split(',')
-        map_name = splitted[1].strip(
-        ) if "BPF_Q" in declaration else splitted[3].strip()
+    __XDP_CFLAGS: ClassVar[List[str]] = [
+        f'-DCTXTYPE={BPF.XDP_STRUCT}',
+        f'-DBACK_TX={BPF.XDP_TX}',
+        f'-DPASS={BPF.XDP_PASS}',
+        f'-DDROP={BPF.XDP_DROP}',
+        f'-DREDIRECT={BPF.XDP_REDIRECT}',
+        '-DXDP=1']
 
-        # Check if this declaration has some attribute
-        if "__attributes__" in declaration:
-            tmp = declaration.split("__attributes__")
-            new_decl = tmp[0] + ";"
-            maps[map_name] = MetricFeatures(
-                swap="SWAP" in tmp[1], export="EXPORT" in tmp[1], empty="EMPTY" in tmp[1])
+    __DEFAULT_CFLAGS: ClassVar[List[str]] = [
+        "-w",
+        f'-DMAX_PROGRAMS_PER_HOOK={BPF._MAX_PROGRAMS_PER_HOOK}',
+        f'-DEPOCH_BASE={__EPOCH_BASE}'] + [f'-D{x}={y}' for x, y in logging._nameToLevel.items()]
 
-        orig_decl = new_decl
+    def __init__(self, log_level: int = logging.INFO, packet_cp_callback: Callable = None, log_cp_callback: Callable = None):
+        EbpfCompiler.__logger.setLevel(log_level)
+        self.__interfaces_programs: Dict[int, InterfaceHolder] = {}
 
-        # If need swap and this map doesn't, then perform changes in declaration
-        if need_swap and (map_name not in maps or not maps[map_name].swap):
-            tmp = splitted[0].split('(')
-            prefix_decl = tmp[0]
-            map_type = tmp[1]
-            # if no shared/public/pinned or already extern then adjust declaration
-            if "BPF_TABLE_" not in prefix_decl and "BPF_QUEUESTACK_" not in prefix_decl and "extern" not in map_type:
-                orig_decl = orig_decl.replace(map_type, '"extern"')
-                index = len(prefix_decl)
-                orig_decl = orig_decl[:index] + "_SHARED" + orig_decl[index:]
+        try:
+            with IPRoute() as ip:
+                ip.link("add", ifname="DeChainy", kind="dummy")
+        except NetlinkError as e:
+            err, _ = e.args
+            EbpfCompiler.__logger.error(
+                "Either another instance of DeChainy is running, or the previous one has not terminated correctly."
+                "In the latter case, try 'sudo ip link del DeChainy', and 'sudo tc qdisc del dev <interface> clsact'"
+                "for every interface you used before." if err == 17 else "Need sudo privileges to run.")
+            exit(err)
 
-        original_code = original_code[:start] + orig_decl + original_code[end:]
-        if cloned_code:
-            cloned_code = cloned_code[:start] + new_decl + cloned_code[end:]
+        # Compiling startup program with buffers
+        # Variable to store startup code, containing the log buffer perf event map
+        with open(os.path.join(EbpfCompiler.__base_dir, "startup.h"), 'r') as fp:
+            startup_code = remove_c_comments(fp.read())
 
-    for map_name, features in maps.items():
-        if features.swap:
-            cloned_code = cloned_code.replace(map_name, f"{map_name}_1")
-    return original_code, cloned_code, maps
+        startup: BPF = BPF(text=startup_code)
+        atexit.unregister(startup.cleanup)
+        if packet_cp_callback:
+            startup['control_plane'].open_perf_buffer(
+                lambda x, y, z: EbpfCompiler.callback_wrapper(x, y, z, packet_cp_callback))
 
+        if log_cp_callback:
+            startup['log_buffer'].open_perf_buffer(
+                lambda x, y, z: EbpfCompiler.callback_wrapper(x, y, z, log_cp_callback, log=True))
 
-def is_batch_supp() -> bool:
-    """Function to check whether the batch operations are supported for this system (kernel >= v5.6)
+        # Starting daemon process to poll perf buffers for messages
+        if packet_cp_callback or log_cp_callback:
+            def poll():
+                try:
+                    while True:
+                        startup.perf_buffer_poll()
+                except Exception:
+                    pass
+            threading.Thread(target=poll, daemon=True).start()
+        self._startup = startup
+        atexit.register(self.__del__)
 
-    Returns:
-        bool: True if they are supported, else otherwise
-    """
-    global __is_batch_supp
-    if __is_batch_supp is None:
-        major, minor = [int(x) for x in run(
-            ['uname', '-r'], stdout=PIPE).stdout.decode('utf-8').split('.')[:2]]
-        __is_batch_supp = True if major > 5 or (
-            major == 5 and minor >= 6) else False
-    return __is_batch_supp
+    @staticmethod
+    def callback_wrapper(cpu, data, size, callback, log=True):
+        class Temporary(ct.Structure):
+            _fields_ = [("metadata", Metadata),
+                        ("raw", ct.c_ubyte * (size - ct.sizeof(Metadata)))] if not log else\
+                [("metadata", Metadata),
+                 ("level", ct.c_uint64),
+                 ("args", ct.c_uint64 * 4),
+                 ("message", ct.c_char * (size - (ct.sizeof(ct.c_uint16) * 4) - (ct.sizeof(ct.c_uint64) * 4)))]
+        return callback(cpu, ct.cast(data, ct.POINTER(Temporary)).contents, size)
+
+    def __del__(self):
+        """Method to clear all the deployed resources from the system"""
+        # Remove only once all kind of eBPF programs attached to all interfaces in use.
+        atexit.unregister(self.__del__)
+        if not hasattr(self, "_startup"):
+            return
+        with IPRoute() as ip:
+            try:
+                ip.link("del", ifname="DeChainy")
+            except Exception:
+                pass
+            for idx in list(self.__interfaces_programs.keys()):
+                EbpfCompiler.__logger.info('Removing all programs from Interface Index {}'.format(
+                    self.__interfaces_programs[idx].name))
+                with self.__interfaces_programs[idx].ingress_xdp.lock, self.__interfaces_programs[idx].egress_xdp.lock:
+                    if self.__interfaces_programs[idx].ingress_xdp.programs or \
+                            self.__interfaces_programs[idx].egress_xdp.programs:
+                        BPF.remove_xdp(
+                            self.__interfaces_programs[idx].name, self.__interfaces_programs[idx].flags)
+                with self.__interfaces_programs[idx].ingress_tc.lock,\
+                        self.__interfaces_programs[idx].egress_tc.lock:
+                    if self.__interfaces_programs[idx].ingress_tc.programs or \
+                            self.__interfaces_programs[idx].egress_tc.programs:
+                        ip.tc("del", "clsact", idx)
+                # tmp = .pop(idx)
+                del self.__interfaces_programs[idx]
+        self._startup.cleanup()
+        del self._startup
+
+    def __inject_pivot(
+            self,
+            mode: int,
+            flags: int,
+            offload_device: str,
+            interface: str,
+            idx: int,
+            program_type: str,
+            mode_map_name: str,
+            parent: str):
+        """Method to inject the pivoting program into a specific interface.
+        The program chain is setup and ready to accept services.
+
+        Args:
+            mode (int): The mode of the program (XDP or TC).
+            flags (int): The flags to be used in the mode.
+            offload_device (str): The device to which offload the program if any.
+            interface (str): The desired interface.
+            idx (int): The index of the interface.
+            program_type (str): The type of the program (Ingress/Egress).
+            mode_map_name (str): The name of the map to use, retrieved from bpf helper function.
+        """
+        with open(f'{EbpfCompiler.__base_dir}/pivoting.c', 'r') as fp:
+            pivoting_code = remove_c_comments(fp.read())\
+                .replace('PROGRAM_TYPE', program_type)\
+                .replace('MODE', EbpfCompiler.__TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress"
+                         else EbpfCompiler.__XDP_MAP_SUFFIX)
+
+        EbpfCompiler.__logger.info(
+            'Compiling Pivot for Interface {} Type {} Mode {}'.format(interface, program_type, mode_map_name))
+
+        # Compiling the eBPF program
+        p = Program(interface=interface, idx=idx, mode=mode, code=pivoting_code,
+                    cflags=EbpfCompiler.__formatted_cflags(mode, program_type),
+                    probe_id=-1, plugin_id=-1, debug=False, flags=flags,
+                    program_id=0, offload_device=offload_device)
+        target = getattr(
+            self.__interfaces_programs[idx], f'{program_type}_{mode_map_name}')
+        with target.lock:
+            if mode == BPF.XDP:
+                BPF.attach_xdp(interface, p.f, flags=flags)
+            else:
+                with IPRoute() as ip:
+                    # Checking if already created the class act for the interface
+                    if not getattr(self.__interfaces_programs[idx], f'ingress_{mode_map_name}').programs \
+                            and not getattr(self.__interfaces_programs[idx], f'egress_{mode_map_name}').programs:
+                        ip.tc("add", "clsact", idx)
+                    ip.tc("add-filter", "bpf", idx, ':1', fd=p.f.fd, name=p.f.name,
+                          parent=parent, classid=1, direct_action=True)
+            target.programs.insert(0, p)
+
+    def remove_hook(self, program_type: str, program: Union[Program, SwapStateCompile]):
+        """Method to remove the program associated to a specific hook. The program chain
+        is updated by removing the service from the chain itself.
+
+        Args:
+            program_type (str): The hook type (ingress/egress).
+            program (Union[Program, SwapStateCompile]): The program to be deleted.
+        """
+        mode_map_name = EbpfCompiler.__TC_MAP_SUFFIX if program.mode == BPF.SCHED_CLS else EbpfCompiler.__XDP_MAP_SUFFIX
+        next_map_name = f'{program_type}_next_{mode_map_name}'
+        type_of_interest = f'{program_type}_{mode_map_name}'
+        target = getattr(
+            self.__interfaces_programs[program.idx], type_of_interest)
+
+        with target.lock:
+            # Retrieving the index of the Program retrieved
+            index = target.programs.index(program)
+            EbpfCompiler.__logger.info('Deleting Program {} Interface {} Type {}'.format(
+                program.program_id, program.interface, program_type))
+
+            target.ids.append(target.programs[index].program_id)
+
+            # Checking if only two programs left into the interface, meaning
+            # that also the pivoting has to be removed
+            if len(target.programs) == 2:
+                EbpfCompiler.__logger.info('Deleting Also Pivot Program')
+                target.programs.clear()
+                # Checking if also the class act or the entire XDP program can be removed
+                if not getattr(self.__interfaces_programs[program.idx], '{}_{}'.format(
+                        "egress" if program_type == "ingress" else "ingress", mode_map_name)).programs:
+                    if program.mode == BPF.SCHED_CLS:
+                        with IPRoute() as ip:
+                            ip.tc("del", "clsact", program.idx)
+                    else:
+                        BPF.remove_xdp(program.interface, program.flags)
+                    del self.__interfaces_programs[program.idx]
+                return
+
+            if index + 1 != len(target.programs):
+                # The program is not the last one in the list, so
+                # modify program CHAIN in order that the previous program calls the
+                # following one instead of the one to be removed
+                target.programs[0][next_map_name][target.programs[index -
+                                                                  1].program_id] = ct.c_int(target.programs[index + 1].f.fd)
+                del target.programs[0][next_map_name][program.program_id]
+            else:
+                # The program is the last one in the list, so set the previous
+                # program to call the following one which will be empty
+                del target.programs[0][next_map_name][target.programs[index-1].program_id]
+            del target.programs[index]
+
+    def patch_hook(self, program_type: str, old_program: Union[Program, SwapStateCompile],
+                   new_code: str, new_cflags: List[str], log_level: int = logging.INFO) -> Union[Program, SwapStateCompile]:
+        """Method to patch a specific provided program belonging to a certain hook.
+        After compiling the new program, if no error are arisen, the old program will be
+        completely deleted and substituting with the new one, preserving its position
+        in the program chain.
+
+        Args:
+            program_type (str): The type of the hook (ingress/egress).
+            old_program (Union[Program, SwapStateCompile]): The old program to be replaced.
+            new_code (str): The new source code to be compiled.
+            new_cflags (List[str]): The new cflags to be used.
+            log_level (int, optional): The log level of the program. Defaults to logging.INFO.
+
+        Raises:
+            exceptions.UnknownInterfaceException: When the provided program belongs to an
+                unknown interface.
+            exceptions.ProgramInChainNotFoundException: When the provided program has not
+                been found in the chain.
+
+        Returns:
+            Union[Program, SwapStateCompile]: The patched program.
+        """
+        if old_program.idx not in self.__interfaces_programs:
+            raise exceptions.UnknownInterfaceException(
+                "Interface with index {} unknown.".format(old_program.idx))
+
+        mode_map_name = EbpfCompiler.__XDP_MAP_SUFFIX if old_program.mode == BPF.XDP else EbpfCompiler.__TC_MAP_SUFFIX
+        program_chain = getattr(
+            self.__interfaces_programs[old_program.idx], f'{program_type}_{mode_map_name}')
+        with program_chain.lock:
+            index = program_chain.programs.index(old_program)
+
+            if not index:
+                raise exceptions.ProgramInChainNotFoundException(
+                    "Program {} not found in the chain".format(old_program.program_id))
+
+            EbpfCompiler.__logger.info(
+                'Patching Program {} Interface {} Type {} Mode {}'.format(old_program.program_id,
+                                                                          old_program.interface,
+                                                                          program_type,
+                                                                          mode_map_name))
+
+            cflags = new_cflags + EbpfCompiler.__formatted_cflags(old_program.mode, program_type,
+                                                                  old_program.program_id, old_program.plugin_id,
+                                                                  old_program.probe_id, log_level)
+
+            original_code, swap_code, features = EbpfCompiler.__precompile_parse(
+                EbpfCompiler.__format_for_hook(
+                    old_program.mode, program_type, EbpfCompiler.__format_helpers(new_code)),
+                cflags)
+
+            # Loading compiled "internal_handler" function and set the previous
+            # plugin program to call in the CHAIN to the current function descriptor
+            ret = Program(interface=old_program.interface, idx=old_program.idx, mode=old_program.mode,
+                          flags=old_program.flags, offload_device=old_program.offload_device,
+                          cflags=cflags, debug=old_program.debug, code=original_code,
+                          program_id=old_program.program_id, plugin_id=old_program.plugin_id,
+                          probe_id=old_program.probe_id, features=features)
+
+            # Updating Service Chain
+            program_chain.programs[0][f'{program_type}_next_{mode_map_name}'][
+                program_chain.programs[index-1].program_id] = ct.c_int(ret.f.fd)
+
+            # Compiling swap program if needed
+            if swap_code:
+                EbpfCompiler.__logger.info('Compiling Also Swap Code')
+                p1 = Program(interface=old_program.interface, idx=old_program.idx, mode=old_program.mode,
+                             flags=old_program.flags, code=swap_code, debug=old_program.debug,
+                             cflags=cflags, offload_device=old_program.offload_device,
+                             program_id=old_program.program_id, plugin_id=old_program.plugin_id,
+                             probe_id=old_program.probe_id, features=features)
+                ret = SwapStateCompile(
+                    ret, p1, f'{program_type}_next_{mode_map_name}')
+            # Append the main program to the list of programs
+            program_chain.programs[index] = ret
+            del old_program
+            return weakref.ref(ret)
+
+    def compile_hook(self, program_type: str,
+                     code: str, interface: str,
+                     mode: int, flags: int,
+                     cflags: List[str], debug: bool,
+                     plugin_id: int, probe_id: int,
+                     log_level: int) -> Union[Program, SwapStateCompile]:
+        """Method to compile program for a specific hook of an interface. If the compilation
+        succeeded, then the program chain is updated with the new service.
+
+        Args:
+            program_type (str): The hook type (ingress/egress).
+            code (str): The program source code.
+            interface (str): The interface to which attach the compiled program.
+            mode (int): The mode used for injecting the program.
+            flags (int): The flags used by the mode when injecting the program.
+            cflags (List[str]): The cflags for the program.
+            debug (bool): True if the program has to be compiled with debug info.
+            plugin_id (int): The id of the plugin.
+            probe_id (int): The id of the probe.
+            log_level (int): The loggin level.
+
+        Raises:
+            exceptions.UnknownInterfaceException: When the interface does not exist.
+
+        Returns:
+            Union[Program, SwapStateCompile]: The compiled program.
+        """
+
+        try:
+            with IPRoute() as ip:
+                idx = ip.link_lookup(ifname=interface)[0]
+        except IndexError:
+            raise exceptions.UnknownInterfaceException(
+                'Interface {} not available'.format(interface))
+
+        # Retrieve eBPF values given Mode and program type
+        mode, flags, offload_device, mode_map_name, parent = EbpfCompiler.__ebpf_values(
+            mode, flags, interface, program_type)
+
+        # Checking if the interface has already been used so there's already
+        # Holder structure
+        if idx not in self.__interfaces_programs:
+            self.__interfaces_programs[idx] = InterfaceHolder(
+                interface, flags, offload_device)
+        elif program_type == "ingress":
+            flags, offload_device = self.__interfaces_programs[
+                idx].flags, self.__interfaces_programs[idx].offload_device
+
+        program_chain = getattr(
+            self.__interfaces_programs[idx], f'{program_type}_{mode_map_name}')
+        with program_chain.lock:
+            # If the array representing the hook is empty, inject the pivot code
+            if not program_chain.programs:
+                self.__inject_pivot(mode, flags, offload_device,
+                                    interface, idx, program_type, mode_map_name, parent)
+            program_id = program_chain.ids.pop(0)
+            EbpfCompiler.__logger.info(
+                'Compiling Program {} Interface {} Type {} Mode {}'.format(program_id, interface, program_type, mode_map_name))
+
+            cflags = cflags + EbpfCompiler.__formatted_cflags(
+                mode, program_type, program_id, plugin_id, probe_id, log_level)
+
+            original_code, swap_code, features = EbpfCompiler.__precompile_parse(
+                EbpfCompiler.__format_for_hook(mode, program_type, EbpfCompiler.__format_helpers(code)), cflags)
+
+            if swap_code:
+                EbpfCompiler.__logger.info('Compiling Also Swap Code')
+                ret = SwapStateCompile(interface=interface, idx=idx, mode=mode, flags=flags, offload_device=offload_device,
+                                       cflags=cflags, debug=debug, code=original_code, program_id=program_id,
+                                       plugin_id=plugin_id, probe_id=probe_id, features=features,
+                                       chain_map=f'{program_type}_next_{mode_map_name}', code_1=swap_code)
+            else:
+                ret = Program(interface=interface, idx=idx, mode=mode, flags=flags, offload_device=offload_device,
+                              cflags=cflags, debug=debug, code=original_code, program_id=program_id,
+                              plugin_id=plugin_id, probe_id=probe_id, features=features)
+
+            # Updating Service Chain
+            program_chain.programs[0][f'{program_type}_next_{mode_map_name}'][
+                program_chain.programs[-1].program_id] = ct.c_int(ret.f.fd)
+
+            # Append the main program to the list of programs
+            program_chain.programs.append(ret)
+            return weakref.ref(ret)
+
+    @staticmethod
+    def __formatted_cflags(
+            mode: int,
+            program_type: str,
+            program_id: int = 0,
+            plugin_id: int = 0,
+            probe_id: int = 0,
+            log_level: int = logging.INFO) -> List[str]:
+        """Static method to return CFLAGS according to hook and mode.
+
+        Args:
+            mode (int): The program mode (XDP or TC).
+            program_type (str): The hook of the program (ingress/egress).
+            program_id (int, optional): The ID of the program to be created. Defaults to 0.
+            plugin_id (int, optional): The ID of the plugin. Defaults to 0.
+            probe_id (int, optional): The ID of the probe within the plugin. Defaults to 0.
+            log_level (int, optional): The Log Level of the probe. Defaults to logging.INFO.
+
+        Returns:
+            List[str]: The list of computed cflags.
+        """
+        return EbpfCompiler.__DEFAULT_CFLAGS + \
+            (EbpfCompiler.__TC_CFLAGS if mode == BPF.SCHED_CLS else EbpfCompiler.__XDP_CFLAGS) + \
+            [f'-DPROGRAM_ID={program_id}', f'-DPLUGIN_ID={plugin_id}',
+             f'-DINGRESS={1 if program_type == "ingress" else 0}',
+             f'-DPROBE_ID={probe_id}', f'-DLOG_LEVEL={log_level}']
+
+    @staticmethod
+    def __ebpf_values(mode: int, flags: int, interface: str, program_type: str) -> Tuple[int, int, str, str, str]:
+        """Static method to return BPF map values according to the hook and mode used.
+
+        Args:
+            mode (int): The program mode (XDP or TC).
+            flags (int): Flags to be used in the mode.
+            interface (str): The interface to which attach the program.
+            program_type (str): The program hook (ingress/egress).
+
+        Returns:
+            Tuple[int, int, str str, str]: The values representing the mode, the suffix for maps names and parent interface.
+        """
+        if program_type == "egress":
+            return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_EGRESS_TC
+        if mode == BPF.SCHED_CLS:
+            return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_INGRESS_TC
+        return BPF.XDP, flags, interface if flags == XDPFlags.HW_MODE else None, EbpfCompiler.__XDP_MAP_SUFFIX, None
+
+    @staticmethod
+    def __precompile_parse(original_code: str, cflags: List[str]) -> Tuple[str, str, Dict[str, MetricFeatures]]:
+        """Static method to compile additional functionalities from original code (swap, erase, and more)
+
+        Args:
+            original_code (str): The original code to be controlled.
+            cflags (List[str]): The list of cflags to be applied.
+
+        Returns:
+            Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps,
+                else the tuple containing also swap code and list of metrics configuration.
+        """
+        # Find map declarations, from the end to the beginning
+        declarations = [(m.start(), m.end(), m.group()) for m in finditer(
+            r"^(BPF_TABLE|BPF_QUEUESTACK|BPF_PERF).*$", original_code, flags=MULTILINE)]
+        declarations.reverse()
+
+        if not any(x for _, _, x in declarations if "__attributes__" in x):
+            return original_code, None, {}
+
+        tmp_code = sub("__attributes__.*", ";", original_code, flags=MULTILINE)
+        b = BPF(text=tmp_code, cflags=cflags)
+
+        # Check if at least one map needs swap
+        need_swap = False
+        active_declarations = []
+        maps = {}
+
+        for start, end, declaration in declarations:
+            splitted = declaration.split(',')
+            map_name = splitted[1].split(")")[0].strip() if (
+                "BPF_Q" in declaration or "BPF_P" in declaration) else splitted[3].split(")")[0].strip()
+            try:
+                b[map_name]
+            except Exception:
+                continue
+
+            active_declarations.append((start, end, declaration))
+            if "__attributes__" in declaration and "SWAP" in declaration:
+                need_swap = True
+        del b
+
+        cloned_code = original_code if need_swap else None
+        for start, end, declaration in active_declarations:
+            new_decl, splitted = declaration, declaration.split(',')
+            map_name = splitted[1].split(")")[0].strip() if (
+                "BPF_Q" in declaration or "BPF_P" in declaration) else splitted[3].split(")")[0].strip()
+
+            # Check if this declaration has some attribute
+            if "__attributes__" in declaration:
+                tmp = declaration.split("__attributes__")
+                new_decl = tmp[0] + ";"
+                maps[map_name] = MetricFeatures(
+                    swap="SWAP" in tmp[1], export="EXPORT" in tmp[1], empty="EMPTY" in tmp[1])
+
+            orig_decl = new_decl
+
+            # If need swap and this map doesn't, then perform changes in declaration
+            if need_swap and (map_name not in maps or not maps[map_name].swap):
+                tmp = splitted[0].split('(')
+                prefix_decl = tmp[0]
+                map_type = tmp[1]
+                if prefix_decl.count("_") <= 1:
+                    if "extern" not in map_type:
+                        new_decl = new_decl.replace(map_type, '"extern"')
+                        index = len(prefix_decl)
+                        orig_decl = orig_decl[:index] + \
+                            "_SHARED" + orig_decl[index:]
+                else:
+                    new_decl = new_decl.replace(map_type, '"extern"').replace(
+                        prefix_decl, '_'.join(prefix_decl.split("_")[:2]))
+            original_code = original_code[:start] + \
+                orig_decl + original_code[end:]
+            if cloned_code:
+                cloned_code = cloned_code[:start] + \
+                    new_decl + cloned_code[end:]
+
+        for map_name, features in maps.items():
+            if features.swap:
+                cloned_code = cloned_code.replace(map_name, f"{map_name}_1")
+        return original_code, cloned_code, maps
+
+    @staticmethod
+    def __format_for_hook(
+            mode: int,
+            program_type: str,
+            code: str) -> str:
+        """Static method to format the code accordingly to the hook and the mode
+
+        Args:
+            mode (int): The program mode (XDP or TC).
+            program_type (str): The program hook (ingress/egress).
+            code (str, optional): The code to be formatted.
+
+        Returns:
+            str: The code correctly formatted.
+        """
+        return code.replace('PROGRAM_TYPE', program_type)\
+            .replace('MODE', EbpfCompiler.__TC_MAP_SUFFIX if mode == BPF.SCHED_CLS or program_type == "egress"
+                     else EbpfCompiler.__XDP_MAP_SUFFIX)
+
+    @staticmethod
+    def __format_helpers(code: str) -> str:
+        """Static method to format the original program code with
+        helpers provided by the framework (e.g., dp_log, REDIRECT(<interface>)).
+
+        Args:
+            code (str): The original code to format.
+
+        Raises:
+            exceptions.UnknownInterfaceException: When the redirect interface is not recognized.
+
+        Returns:
+            str: The code correctly formatted.
+        """
+        # Removing C-like comments
+        code = remove_c_comments(code)
+
+        declarations = [(m.start(), m.end(), m.group(1)) for m in finditer(
+            r"return REDIRECT\((.*)\);.*$", code, MULTILINE)]
+        declarations.reverse()
+
+        # sub REDIRECT <interface> with proper code
+        with IPRoute() as ip:
+            for start, end, declaration in declarations:
+                try:
+                    idx = ip.link_lookup(ifname=declaration)[0]
+                    code = code[:start] + 'u32 index = {}; return bpf_redirect(&index, 0);'.format(
+                        idx) + code[end:]
+                except IndexError:
+                    raise exceptions.UnknownInterfaceException(
+                        f'Interface {declaration} not available')
+
+        # Finding dp_log function invocations if any, and reverse to avoid bad
+        # indexes while updating
+        matches = [(m.start(), m.end()) for m in finditer('dp_log.*;', code)]
+        matches.reverse()
+        for start, end in matches:
+            # Getting the log level specified
+            log_level = code[start + 7: end].split(",")[0]
+            # Substitute the dp_log invocation (length 6 characters) with the right
+            # logging function
+            code = code[:start] \
+                + f'if ({log_level} <= LOG_LEVEL)' \
+                + '{LOG_STRUCT' \
+                + code[start + 6:end] \
+                + 'log_buffer.perf_submit(ctx, &msg_struct, sizeof(msg_struct));}' \
+                + code[end:]
+        with open(f'{EbpfCompiler.__base_dir}/helpers.h', 'r') as fp,\
+                open(f'{EbpfCompiler.__base_dir}/wrapper.c', 'r') as fp1:
+            helpers_code = remove_c_comments(fp.read())
+            wrapper_code = remove_c_comments(fp1.read())
+        return helpers_code + wrapper_code + code
+
+    @staticmethod
+    def is_batch_supp() -> bool:
+        """Static method to check whether the batch operations are supported for this system (kernel >= v5.6).
+
+        Returns:
+            bool: True if they are supported, else otherwise.
+        """
+        if EbpfCompiler.__is_batch_supp is None:
+            release = platform.release()
+            if not release:
+                EbpfCompiler.__is_batch_supp = False
+            major, minor = [int(x) for x in release.split('.')[:2]]
+            EbpfCompiler.__is_batch_supp = True if major > 5 or (
+                major == 5 and minor >= 6) else False
+        return EbpfCompiler.__is_batch_supp
