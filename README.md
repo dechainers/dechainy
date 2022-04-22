@@ -3,7 +3,7 @@
 ![Release](https://github.com/dechainers/dechainy/workflows/Release/badge.svg)
 ![API Doc autogen](https://github.com/dechainers/dechainy/workflows/API%20Doc%20autogen/badge.svg)
 
-![DeChainy Logo](docs/logo.png)
+![DeChainy Logo](https://github.com/dechainers/dechainy/blob/master/docs/logo.png?raw=true)
 
 # DeChainy
 

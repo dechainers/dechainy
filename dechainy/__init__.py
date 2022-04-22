@@ -13,4 +13,4 @@
 # limitations under the License.
 base_url = "https://github.com/dechainers"
 project_url = "{}/dechainy.git".format(base_url)
-version = "1.0"
+version = "0.1"

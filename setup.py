@@ -23,7 +23,7 @@ with open('requirements.txt') as fh:
     requirements = fh.read().splitlines()
 
 setuptools.setup(
-    name="DeChainy",
+    name="dechainy",
     author="Simone Magnani",
     author_email="simonemagnani.96@gmail.com",
     version=version,
@@ -34,9 +34,10 @@ setuptools.setup(
     packages=setuptools.find_packages(exclude=("tests",)),
     license_files=("LICENSE",),
     classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: Apache-2.0 License",
-        "Operating System :: Linux",
+                "Intended Audience :: Developers",
+                "License :: OSI Approved :: Apache Software License",
+                "Natural Language :: English",
+                "Programming Language :: Python :: 3.6"
     ],
     install_requires=requirements,
     include_package_data=True,
