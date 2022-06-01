@@ -16,7 +16,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: Building Docker Test image
       run: |
-        docker build --no-cache --build-arg DEFAULT_BUILDTYPE=test -f Dockerfile -t s41m0n/dechainy:test .
+        docker build --no-cache --build-arg DEFAULT_BUILDTYPE=test -t s41m0n/dechainy:test .
     - name: Testing Docker Image
       run: |
         docker run --rm --privileged --network host \

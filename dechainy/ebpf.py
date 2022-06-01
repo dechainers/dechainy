@@ -24,7 +24,7 @@ from re import MULTILINE, finditer, sub
 from threading import RLock
 from typing import Callable, ClassVar, Dict, List, Tuple, Union
 
-from bcc import BPF, XDPFlags
+from bcc import BPF
 from bcc.table import QueueStack, TableBase
 from pyroute2 import IPRoute
 from pyroute2.netlink.exceptions import NetlinkError
@@ -122,6 +122,8 @@ class Program:
     def __del__(self):
         """Method to clear resources deployed in the system"""
         # Calling the BCC defined cleanup function which would have been called while exitting
+        if not hasattr(self, "bpf"):
+            return
         self.bpf.cleanup()
         del self.bpf
         del self.f
@@ -174,6 +176,8 @@ class SwapStateCompile(Program):
     def __del__(self):
         """Method to clear resoruces deployed in the system"""
         super().__del__()
+        if not hasattr(self, "bpf_1"):
+            return
         self.bpf_1.cleanup()
         del self.bpf_1
         del self.f_1
@@ -355,16 +359,16 @@ class EbpfCompiler(metaclass=Singleton):
     def __del__(self):
         """Method to clear all the deployed resources from the system"""
         # Remove only once all kind of eBPF programs attached to all interfaces in use.
-        atexit.unregister(self.__del__)
         if not hasattr(self, "_startup"):
             return
+        atexit.unregister(self.__del__)
         with IPRoute() as ip:
             try:
                 ip.link("del", ifname="DeChainy")
             except Exception:
                 pass
             for idx in list(self.__interfaces_programs.keys()):
-                EbpfCompiler.__logger.info('Removing all programs from Interface Index {}'.format(
+                EbpfCompiler.__logger.info('Removing all programs from Interface {}'.format(
                     self.__interfaces_programs[idx].name))
                 with self.__interfaces_programs[idx].ingress_xdp.lock, self.__interfaces_programs[idx].egress_xdp.lock:
                     if self.__interfaces_programs[idx].ingress_xdp.programs or \
@@ -376,7 +380,6 @@ class EbpfCompiler(metaclass=Singleton):
                     if self.__interfaces_programs[idx].ingress_tc.programs or \
                             self.__interfaces_programs[idx].egress_tc.programs:
                         ip.tc("del", "clsact", idx)
-                # tmp = .pop(idx)
                 del self.__interfaces_programs[idx]
         self._startup.cleanup()
         del self._startup
@@ -440,6 +443,8 @@ class EbpfCompiler(metaclass=Singleton):
             program_type (str): The hook type (ingress/egress).
             program (Union[Program, SwapStateCompile]): The program to be deleted.
         """
+        if not program:
+            return
         mode_map_name = EbpfCompiler.__TC_MAP_SUFFIX if program.mode == BPF.SCHED_CLS else EbpfCompiler.__XDP_MAP_SUFFIX
         next_map_name = f'{program_type}_next_{mode_map_name}'
         type_of_interest = f'{program_type}_{mode_map_name}'
@@ -690,7 +695,10 @@ class EbpfCompiler(metaclass=Singleton):
             return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_EGRESS_TC
         if mode == BPF.SCHED_CLS:
             return BPF.SCHED_CLS, 0, None, EbpfCompiler.__TC_MAP_SUFFIX, EbpfCompiler.__PARENT_INGRESS_TC
-        return BPF.XDP, flags, interface if flags == XDPFlags.HW_MODE else None, EbpfCompiler.__XDP_MAP_SUFFIX, None
+        elif mode == BPF.XDP:
+            return BPF.XDP, flags, (interface if flags == BPF.XDP_FLAGS_HW_MODE else None), EbpfCompiler.__XDP_MAP_SUFFIX, None
+        else:
+            raise Exception("Unknown mode {}".format(mode))
 
     @staticmethod
     def __precompile_parse(original_code: str, cflags: List[str]) -> Tuple[str, str, Dict[str, MetricFeatures]]:
@@ -726,12 +734,15 @@ class EbpfCompiler(metaclass=Singleton):
                 "BPF_Q" in declaration or "BPF_P" in declaration) else splitted[3].split(")")[0].strip()
             try:
                 b[map_name]
+                maps[map_name] = MetricFeatures(
+                    swap=False, export=False, empty=False)
             except Exception:
                 continue
 
             active_declarations.append((start, end, declaration))
             if "__attributes__" in declaration and "SWAP" in declaration:
                 need_swap = True
+        b.cleanup()
         del b
 
         cloned_code = original_code if need_swap else None
@@ -744,8 +755,9 @@ class EbpfCompiler(metaclass=Singleton):
             if "__attributes__" in declaration:
                 tmp = declaration.split("__attributes__")
                 new_decl = tmp[0] + ";"
-                maps[map_name] = MetricFeatures(
-                    swap="SWAP" in tmp[1], export="EXPORT" in tmp[1], empty="EMPTY" in tmp[1])
+                maps[map_name].swap = "SWAP" in tmp[1]
+                maps[map_name].export = "EXPORT" in tmp[1]
+                maps[map_name].empty = "EMPTY" in tmp[1]
 
             orig_decl = new_decl
 

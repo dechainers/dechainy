@@ -29,10 +29,10 @@ However, if you want to check everything is as expected, you can locally run:
 pdoc3 dechainy/ -o <dir>
 ```
 
-The documentation is generated under the *dir* directory. Compiling locally requires the entire framework to be up and running, meaning also all its dependencies. For that reason, I strongly suggest using the [Dockerfile](../Dockerfile.docgen) in order to build a Docker image with all the dependency and ready to generate the doc, or you can use the most updated **s41m0n/dechainy:docgen** one and mount the entire *dechainy/* directory into */app/dechainy*, in order to have the code up-to-date.
+The documentation is generated under the *dir* directory. Compiling locally requires the entire framework to be up and running, meaning also all its dependencies. For that reason, I strongly suggest using the `--build-arg DEFAULT_BUILDTYPE=docgen` while building the [Dockerfile](../Dockerfile) in order to build a Docker image with all the dependency and ready to generate the doc, or you can use the most updated **s41m0n/dechainy:docgen** one and mount the entire *dechainy/* directory into */app/dechainy*, in order to have the code up-to-date.
 
 ```bash
-docker build -f Dockerfile.docgen -t s41m0n/dechainy:docgen .
+docker build --build-arg DEFAULT_BUILDTYPE=docgen -f Dockerfile -t s41m0n/dechainy:docgen .
 ```
 
 ```bash
