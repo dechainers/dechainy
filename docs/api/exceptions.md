@@ -4,32 +4,16 @@ Module dechainy.exceptions
 Classes
 -------
 
-`ClusterNotFoundException(*args, **kwargs)`
-:   Exception to be thrown when the desired Cluster has not been found
-
-    ### Ancestors (in MRO)
-
-    * builtins.Exception
-    * builtins.BaseException
-
-`ClusterWithoutCPException(*args, **kwargs)`
-:   Exception to be thrown when creating a cluster without specifying a custom Control plane code
-
-    ### Ancestors (in MRO)
-
-    * builtins.Exception
-    * builtins.BaseException
-
-`CustomCPDisabledException(*args, **kwargs)`
-:   Exception to be thrown when executing custom Control Plane functions that are disabled.
-
-    ### Ancestors (in MRO)
-
-    * builtins.Exception
-    * builtins.BaseException
-
 `HookDisabledException(*args, **kwargs)`
 :   Exception to be thrown when performing operations on a hook that has been disabled in the probe config
+
+    ### Ancestors (in MRO)
+
+    * builtins.Exception
+    * builtins.BaseException
+
+`InvalidPluginException(*args, **kwargs)`
+:   Exception to be thrown when Plugin is not compliant
 
     ### Ancestors (in MRO)
 
@@ -44,16 +28,16 @@ Classes
     * builtins.Exception
     * builtins.BaseException
 
-`MissingInterfaceInProbeException(*args, **kwargs)`
-:   Exception to be thrown when the Interface is not specified in the Probe Configuration
+`NoCodeProbeException(*args, **kwargs)`
+:   Exception to be thrown when creating a probe without at least 1 program type active
 
     ### Ancestors (in MRO)
 
     * builtins.Exception
     * builtins.BaseException
 
-`NoCodeProbeException(*args, **kwargs)`
-:   Exception to be thrown when creating a probe without at least 1 program type active
+`PluginAlreadyExistsException(*args, **kwargs)`
+:   Exception to be thrown when the desired Plugin to create already exists
 
     ### Ancestors (in MRO)
 
@@ -68,16 +52,16 @@ Classes
     * builtins.Exception
     * builtins.BaseException
 
-`ProbeAlreadyExistsException(*args, **kwargs)`
-:   Exception to be thrown when the desired Probe already exists in the system
+`PluginUrlNotValidException(*args, **kwargs)`
+:   Exception to be thrown when the url of the desired Plugin to download is not valid
 
     ### Ancestors (in MRO)
 
     * builtins.Exception
     * builtins.BaseException
 
-`ProbeInClusterException(*args, **kwargs)`
-:   Exception to be thrown when the desired plugin to delete is in a Cluster
+`ProbeAlreadyExistsException(*args, **kwargs)`
+:   Exception to be thrown when the desired Probe already exists in the system
 
     ### Ancestors (in MRO)
 
@@ -92,6 +76,14 @@ Classes
     * builtins.Exception
     * builtins.BaseException
 
+`ProgramInChainNotFoundException(*args, **kwargs)`
+:   Exception to be thrown when the specified program has not been fond in the chain
+
+    ### Ancestors (in MRO)
+
+    * builtins.Exception
+    * builtins.BaseException
+
 `UnknownInterfaceException(*args, **kwargs)`
 :   Exception to be thrown when the desired Interface does not exist
 
@@ -100,8 +92,8 @@ Classes
     * builtins.Exception
     * builtins.BaseException
 
-`UnsupportedOperationException(*args, **kwargs)`
-:   Exception to be thrown when requiring an endpoint (e.g., "/exec") not supported by the probe/cluster
+`UnknownPluginFormatException(*args, **kwargs)`
+:   Exception to be thrown when Plugin format not recognized or supported
 
     ### Ancestors (in MRO)
 

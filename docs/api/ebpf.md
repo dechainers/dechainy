@@ -1,138 +1,148 @@
 Module dechainy.ebpf
 ====================
 
-Functions
----------
-
-    
-`get_bpf_values(mode: int, flags: int, interface: str, program_type: str) ‑> Tuple[int, int, str, str, str]`
-:   Function to return BPF map values according to ingress/egress and TC/XDP
-    
-    Args:
-        mode (int): The program mode (XDP or TC)
-        flags (int): Flags to be used in the mode
-        interface (str): The interface to which attach the program
-        program_type (str): The program hook (ingress/egress)
-    
-    Returns:
-        Tuple[int, int, str str, str]: The values representing the mode, the suffix for maps names and parent interface
-
-    
-`get_cflags(mode: int, program_type: str, probe_id: int = 0, log_level: int = 1) ‑> List[str]`
-:   Function to return CFLAGS according to ingress/egress and TC/XDP
-    
-    Args:
-        mode (int): The program mode (XDP or TC)
-        program_type (str): The hook of the program (ingress/egress)
-        probe_id (int, optional): The ID of the probe to be created. Defaults to 0.
-        log_level (int, optional): The Log Level of the probe. Defaults to DPLogLevel.LOG_INFO.
-    
-    Returns:
-        List[str]: The list of computed cflags
-
-    
-`get_formatted_code(mode: int, program_type: str, code: str) ‑> str`
-:   Function to return the probe wrapper code according to ingress/egress, TC/XDP, and substitute dp_log function
-    
-    Args:
-        mode (int): The program mode (XDP or TC)
-        program_type (str): The program hook (ingress/egress)
-        code (str, optional): The code to be formatted
-    
-    Returns:
-        str: The code formatted accordingly
-
-    
-`get_pivoting_code(mode: int, program_type: str) ‑> str`
-:   Function to return the pivoting code according to ingress/egress and TC/XDP
-    
-    Args:
-        mode (int): The program mode (XDP or TC)
-        program_type (str): The program hook (ingress/egress)
-    
-    Returns:
-        str: The pivoting code for the hook
-
-    
-`get_startup_code() ‑> str`
-:   Function to return the startup code for the entire framework
-    
-    Returns:
-        str: The startup code
-
-    
-`is_batch_supp() ‑> bool`
-:   Function to check whether the batch operations are supported for this system (kernel >= v5.6)
-    
-    Returns:
-        bool: True if they are supported, else otherwise
-
-    
-`precompile_parse(original_code: str) ‑> Tuple[str, str, Dict[str, dechainy.configurations.MetricFeatures]]`
-:   Function to compile additional functionalities from original code (swap, erase, and more)
-    
-    Args:
-        original_code (str): The original code to be controlled
-    
-    Returns:
-        Tuple[str, str, Dict[str, MetricFeatures]]: Only the original code if no swaps maps,
-            else the tuple containing also swap code and list of metrics configuration
-
 Classes
 -------
 
-`ClusterCompilation(*args, **kwargs)`
-:   Class to represent a compilation of a Cluster object.
+`EbpfCompiler(log_level: int = 20, packet_cp_callback: Callable = None, log_cp_callback: Callable = None)`
+:   Class (Singleton) to handle eBPF programs compilation, injection, and deletion.
+    
+    Static Attributes:
+    __logger (logging.Logger): The instance logger.
+    __is_batch_supp (bool): True if batch operations are supported. Default to None.
+    __base_dir (str): Path to the sourcebpf folder, where there are source eBPF codes.
+    __PARENT_INGRESS_TC (str): Address of the parent ingress hook in TC.
+    __PARENT_EGRESS_TC (str): Address of the parent egress hook in TC.
+    __XDP_MAP_SUFFIX (str): Suffix used for eBPF maps in XDP mode.
+    __TC_MAP_SUFFIX (str):Suffix used for eBPF maps in TC mode.
+    __EPOCH_BASE (int): Base timestamp to compute UNIX timestamps in eBPF programs.
+    __TC_CFLAGS (List[str]): List of cflags to be used in TC mode.
+    __XDP_CFLAGS (List[str]): List of cflags to be used in XDP mode.
+    __DEFAULT_CFLAGS (List[str]): List of default cflags.
     
     Attributes:
-        key (str): The name of the plugin
-        value (List[Plugin]): List of probes for that specific plugin
+        __startup (BPF): Startup eBPF program, where logging and control plane buffers are declared.
+        __interfaces_programs: Dictionary holding for each interface the list of programs
+            and attributes to be used.
 
-    ### Ancestors (in MRO)
+    ### Static methods
 
-    * dechainy.utility.Dict
-    * builtins.dict
+    `callback_wrapper(cpu, data, size, callback, log=True)`
+    :
 
-`InterfaceHolder(name: str, flags: int, offload_device: str)`
-:   Simple class to store information concerning the programs attached to an interface
+    `is_batch_supp() ‑> bool`
+    :   Static method to check whether the batch operations are supported for this system (kernel >= v5.6).
+        
+        Returns:
+            bool: True if they are supported, else otherwise.
+
+    ### Methods
+
+    `compile_hook(self, program_type: str, code: str, interface: str, mode: int, flags: int, cflags: List[str], debug: bool, plugin_id: int, probe_id: int, log_level: int) ‑> Union[dechainy.ebpf.Program, dechainy.ebpf.SwapStateCompile]`
+    :   Method to compile program for a specific hook of an interface. If the compilation
+        succeeded, then the program chain is updated with the new service.
+        
+        Args:
+            program_type (str): The hook type (ingress/egress).
+            code (str): The program source code.
+            interface (str): The interface to which attach the compiled program.
+            mode (int): The mode used for injecting the program.
+            flags (int): The flags used by the mode when injecting the program.
+            cflags (List[str]): The cflags for the program.
+            debug (bool): True if the program has to be compiled with debug info.
+            plugin_id (int): The id of the plugin.
+            probe_id (int): The id of the probe.
+            log_level (int): The loggin level.
+        
+        Raises:
+            exceptions.UnknownInterfaceException: When the interface does not exist.
+        
+        Returns:
+            Union[Program, SwapStateCompile]: The compiled program.
+
+    `patch_hook(self, program_type: str, old_program: Union[dechainy.ebpf.Program, dechainy.ebpf.SwapStateCompile], new_code: str, new_cflags: List[str], log_level: int = 20) ‑> Union[dechainy.ebpf.Program, dechainy.ebpf.SwapStateCompile]`
+    :   Method to patch a specific provided program belonging to a certain hook.
+        After compiling the new program, if no error are arisen, the old program will be
+        completely deleted and substituting with the new one, preserving its position
+        in the program chain.
+        
+        Args:
+            program_type (str): The type of the hook (ingress/egress).
+            old_program (Union[Program, SwapStateCompile]): The old program to be replaced.
+            new_code (str): The new source code to be compiled.
+            new_cflags (List[str]): The new cflags to be used.
+            log_level (int, optional): The log level of the program. Defaults to logging.INFO.
+        
+        Raises:
+            exceptions.UnknownInterfaceException: When the provided program belongs to an
+                unknown interface.
+            exceptions.ProgramInChainNotFoundException: When the provided program has not
+                been found in the chain.
+        
+        Returns:
+            Union[Program, SwapStateCompile]: The patched program.
+
+    `remove_hook(self, program_type: str, program: Union[dechainy.ebpf.Program, dechainy.ebpf.SwapStateCompile])`
+    :   Method to remove the program associated to a specific hook. The program chain
+        is updated by removing the service from the chain itself.
+        
+        Args:
+            program_type (str): The hook type (ingress/egress).
+            program (Union[Program, SwapStateCompile]): The program to be deleted.
+
+`HookTypeHolder(programs: List[Union[dechainy.ebpf.SwapStateCompile, dechainy.ebpf.Program]] = <factory>, ids: List[int] = <factory>)`
+:   Class to hold current programs and free IDs available for a specific hook of an interface.
     
     Attributes:
-        name (str): The name of the interface
-        flags (int): The flags used in injection
-        offload_device (str): The name of the device to which offload the program if any
-        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode
-        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode
-        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode
-        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode
+        programs (List[Program]): List of eBPF program injected.
+        ids (List[int]): List of available IDs to be used for new programs.
+        lock (RLock): Lock for the hook.
 
-    ### Ancestors (in MRO)
+    ### Class variables
 
-    * dechainy.utility.Dict
-    * builtins.dict
+    `ids: List[int]`
+    :
 
-`LpmKey(*args, **kwargs)`
-:   C struct representing the LPM_KEY
+    `programs: List[Union[dechainy.ebpf.SwapStateCompile, dechainy.ebpf.Program]]`
+    :
+
+`InterfaceHolder(name: str, flags: int, offload_device: str, ingress_xdp: dechainy.ebpf.HookTypeHolder = <factory>, ingress_tc: dechainy.ebpf.HookTypeHolder = <factory>, egress_xdp: dechainy.ebpf.HookTypeHolder = <factory>, egress_tc: dechainy.ebpf.HookTypeHolder = <factory>)`
+:   Simple class to store information concerning the programs attached to an interface.
     
     Attributes:
-        netmask_len (c_uint32): the length of the netmask
-        ip (c_uint32): the ip specified
+        name (str): The name of the interface.
+        flags (int): The flags used in injection.
+        offload_device (str): The name of the device to which offload the program if any.
+        ingress_xdp (List[Program]): The list of programs attached to ingress hook in XDP mode.
+        ingress_tc (List[Program]): The list of programs attached to ingress hook in TC mode.
+        egress_xdp (List[Program]): The list of programs attached to egress hook in XDP mode.
+        egress_tc (List[Program]): The list of programs attached to egress hook in TC mode.
 
-    ### Ancestors (in MRO)
+    ### Class variables
 
-    * _ctypes.Structure
-    * _ctypes._CData
+    `egress_tc: dechainy.ebpf.HookTypeHolder`
+    :
 
-    ### Instance variables
+    `egress_xdp: dechainy.ebpf.HookTypeHolder`
+    :
 
-    `ip`
-    :   Structure/Union member
+    `flags: int`
+    :
 
-    `netmask_len`
-    :   Structure/Union member
+    `ingress_tc: dechainy.ebpf.HookTypeHolder`
+    :
+
+    `ingress_xdp: dechainy.ebpf.HookTypeHolder`
+    :
+
+    `name: str`
+    :
+
+    `offload_device: str`
+    :
 
 `Metadata(*args, **kwargs)`
 :   C struct representing the pkt_metadata structure in Data Plane programs
-    
     Attributes:
         ifindex (c_uint32): The interface on which the packet was received
         ptype (c_uint32): The program type ingress/egress
@@ -148,62 +158,144 @@ Classes
     `ifindex`
     :   Structure/Union member
 
+    `ingress`
+    :   Structure/Union member
+
+    `length`
+    :   Structure/Union member
+
+    `plugin_id`
+    :   Structure/Union member
+
     `probe_id`
     :   Structure/Union member
 
-    `ptype`
+    `program_id`
     :   Structure/Union member
 
-`ProbeCompilation()`
-:   Class representing the compilation object of a Probe
+    `xdp`
+    :   Structure/Union member
+
+`MetricFeatures(swap: bool = False, empty: bool = False, export: bool = False)`
+:   Class to represent all the possible features for an Adaptmon metric
     
     Attributes:
-        cp_function (ModuleType): The module containing the optional Controlplane functions
-        ingress (Union[Program, SwapStateCompile]): Program compiled for the ingress hook
-        egress (Union[Program, SwapStateCompile]): Program compiled for the egress hook
+        swap(bool): True if the metric requires swapping programs, False otherwise
+        empty(bool): True if the metric needs to be emptied, False otherwise
+        export(bool): True if the metric needs to be exported, False otherwise
+
+    ### Class variables
+
+    `empty: bool`
+    :
+
+    `export: bool`
+    :
+
+    `swap: bool`
+    :
+
+`Program(interface: str, idx: int, mode: int, flags: int, code: str, program_id: int, probe_id: int, plugin_id: int, debug: bool = False, cflags: List[str] = <factory>, features: Dict[str, dechainy.ebpf.MetricFeatures] = <factory>, offload_device: str = None)`
+:   Program class to handle both useful information and BPF program.
+    
+    Attributes:
+        interface (str): The interface to attach the program to
+        idx (int): The interface's index, retrieved using IPDB
+        mode (int): The program mode (XDP or TC)
+        flags (int): The flags used for injecting the program.
+        code (str): The source code.
+        program_id (int): The ID of the program.
+        debug (bool): True if the program is compiled with debug info. Default to False.
+        cflags (List[str]): List of cflags for the program. Default to [].
+        features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
+        offload_device (str): Device used for offloading the program. Default to None
+        bpf (BPF): The eBPF compiled program
+        f (BPF.Function): The function loaded from the program injected in the chain.
+
+    ### Descendants
+
+    * dechainy.ebpf.SwapStateCompile
+
+    ### Class variables
+
+    `bpf: bcc.BPF`
+    :
+
+    `cflags: List[str]`
+    :
+
+    `code: str`
+    :
+
+    `debug: bool`
+    :
+
+    `f: bcc.BPF.Function`
+    :
+
+    `features: Dict[str, dechainy.ebpf.MetricFeatures]`
+    :
+
+    `flags: int`
+    :
+
+    `idx: int`
+    :
+
+    `interface: str`
+    :
+
+    `mode: int`
+    :
+
+    `offload_device: str`
+    :
+
+    `plugin_id: int`
+    :
+
+    `probe_id: int`
+    :
+
+    `program_id: int`
+    :
+
+    ### Methods
+
+    `trigger_read(self)`
+    :
+
+`SwapStateCompile(interface: str, idx: int, mode: int, flags: int, code: str, program_id: int, probe_id: int, plugin_id: int, debug: bool = False, cflags: List[str] = <factory>, features: Dict[str, dechainy.ebpf.MetricFeatures] = <factory>, offload_device: str = None, chain_map: str = None, code_1: str = None, index: int = 0)`
+:   Class storing the state of a program when the SWAP of at least 1 map is required.
+    
+    Attributes:
+        index (int): The index of the current active program
+        _programs (List[Program]): The list containing the two programs compiled.
+        chain_map (TableBase): The eBPF table performing the chain.
+        program_id (int): The ID of the programs.
+        mode (int): The mode used for injecting eBPF programs.
+        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
 
     ### Ancestors (in MRO)
 
-    * dechainy.utility.Dict
-    * builtins.dict
+    * dechainy.ebpf.Program
 
-`Program(interface: str, idx: int, mode: int, bpf: bcc.BPF, fd: int = None, probe_id: int = 0, red_idx: int = 0, features: Dict[str, dechainy.configurations.MetricFeatures] = {})`
-:   Program class to handle both useful information and BPF program.
-    
-    Args:
-        interface (str): The interface to attach the program to
-        idx (int): The interface's index, retrieved using IPDB
-        mode (int): The program mode (XDP or TC)
-        bpf (BPF): The eBPF compiled program
-        fd (int, optional): The file descriptor of the main function in the program. Defaults to None.
-        probe_id (int, optional): The ID of the probe. Defaults to 0.
-        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
-    
-    Attributes:
-        interface (str): The interface to attach the program to
-        idx (int): The interface's index, retrieved using IPDB
-        mode (int): The program mode (XDP or TC)
-        bpf (BPF): The eBPF compiled program
-        fd (int): The file descriptor of the main function in the program. Defaults to None.
-        probe_id (int): The ID of the probe. Defaults to 0.
-        red_idx (int): Index of the interface packets are redirect, if needed
-        is_destroyed (bool): Boolean value set to True when the instance is destroyed
-        features (Dict[str, MetricFeatures]): The map of features if any. Default {}.
+    ### Class variables
 
-`SwapStateCompile(programs: List[dechainy.ebpf.Program], chain_map: bcc.table.TableBase)`
-:   Class storing the state of a program when the SWAP of at least 1 map is required.
-    
-    Args:
-        programs (List[Program]): The list of the two compiled programs
-        pivot (Program): The pivoting eBPF program compiled
-    
-    Attributes:
-        maps (List[str]): The maps defined as swappable
-        index (int): The index of the current active program
-        programs (List[Program]): The list containing the two programs compiled
-        chain_map (TableBase): The eBPF table performing the chain
-        programs_id (int): The probe ID of the programs
-        features (Dict[str, MetricFeatures]): The map of features if any. Default None.
+    `bpf_1: bcc.BPF`
+    :
+
+    `chain_map: str`
+    :
+
+    `code_1: str`
+    :
+
+    `f_1: bcc.BPF.Function`
+    :
+
+    `index: int`
+    :
 
     ### Methods
 

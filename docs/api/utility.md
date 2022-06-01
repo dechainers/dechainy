@@ -5,6 +5,10 @@ Functions
 ---------
 
     
+`cint_type_limit(c_int_type)`
+:   
+
+    
 `ctype_to_normal(obj: <built-in function any>) ‑> <built-in function any>`
 :   Function to convert a ctype object into a Python Serializable one
     
@@ -13,6 +17,18 @@ Functions
     
     Returns:
         any: The object converted
+
+    
+`get_logger(name: str, filepath: str = None, log_level: int = 20) ‑> logging.Logger`
+:   Function to create a logger or retrieve it if already created.
+    
+    Args:
+        name (str): The name of the logger.
+        filepath (str, optional): Path to the logging file, if required. Defaults to None.
+        log_level (int, optional): Log Level taken from the logging module. Defaults to logging.INFO.
+    
+    Returns:
+        logging.Logger: The logger created/retrieved.
 
     
 `ipv4_to_network_int(address: str) ‑> int`
@@ -33,6 +49,17 @@ Functions
     
     Returns:
         str: the address as string
+
+    
+`native_get_interface_ip_netmask(interface: str) ‑> Tuple[str, int]`
+:   Function to return the IP address and netmask of
+    a given interface.
+    
+    Args:
+        interface (str): The interface of interest.
+    
+    Returns:
+        Tuple[str, int]: The IP address and netmask.
 
     
 `port_to_host_int(port: int) ‑> int`
@@ -92,55 +119,11 @@ Functions
 Classes
 -------
 
-`CPProcess(target_fun: Callable, ent, time_window: float, name: str, daemon: bool = False)`
-:   Utility class to create a Process (stopped when destroying its proprietary)
-    to execute a function locally every time_window.
-    
-    Args:
-        target_fun (Callable): The function to execute periodically
-        ent (BaseEntity): The entity which invoked the function
-        time_window (int): The periodic restart value
-        name (str): The name of the created process
-        daemon (bool): The daemon mode. Default False.
-
-    ### Ancestors (in MRO)
-
-    * multiprocessing.context.Process
-    * multiprocessing.process.BaseProcess
-
-    ### Methods
-
-    `cp_run(self, target_fun, ent, time_window, name)`
-    :   Function to execute the provided function, if no stop signal registered within the time_window provided.
-
-    `stop(self)`
-    :   Function called by the proprietary to stop the Process
-
-`Dict(*args, **kwargs)`
-:   Utility class to define a Class  attributes accessible also with square brackets
-
-    ### Ancestors (in MRO)
-
-    * builtins.dict
-
-    ### Descendants
-
-    * dechainy.configurations.AppConfig
-    * dechainy.configurations.ClusterConfig
-    * dechainy.configurations.FirewallRule
-    * dechainy.configurations.MitigatorRule
-    * dechainy.configurations.PluginConfig
-    * dechainy.configurations.ProbeConfig
-    * dechainy.configurations.ServerConfig
-    * dechainy.ebpf.ClusterCompilation
-    * dechainy.ebpf.InterfaceHolder
-    * dechainy.ebpf.ProbeCompilation
-
 `Singleton(*args, **kwargs)`
 :   Metatype utility class to define a Singleton Pattern
     
     Attributes:
-        _instance(object): The instance of the Singleton
+        _instances(WeakValueDictionary): The instances of the Singletons
 
     ### Ancestors (in MRO)
 
