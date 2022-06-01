@@ -76,7 +76,7 @@ class Probe:
         if isinstance(self.log_level, str):
             self.log_level = logging._nameToLevel[self.log_level]
         self._logger: logging.Logger = get_logger(
-            self.__class__.__name__, log_level=self.log_level)
+            f"{self.name}{self.probe_id}", log_level=self.log_level)
 
         if not self.ingress.required and not self.egress.required:
             raise NoCodeProbeException(
@@ -105,15 +105,14 @@ class Probe:
     def __del__(self):
         """Method to clear all resources associated to the probe, including
         eBPF program and logger."""
+        if not hasattr(self, "_logger"):
+            return
         self._logger.manager.loggerDict.pop(self._logger.name)
         del self._logger
         for ttype in ["ingress", "egress"]:
-            hook: HookSetting = getattr(self, ttype)
-            p = hook.program_ref()
-            if not p:
-                continue
-            EbpfCompiler().remove_hook(ttype, p)
-            del p
+            EbpfCompiler().remove_hook(ttype, getattr(self, ttype).program_ref())
+        del self.ingress
+        del self.egress
 
     def __getitem__(self, key: str) -> Union[str, Program]:
         """Method to access directly Programs in the class

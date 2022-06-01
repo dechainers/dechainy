@@ -58,15 +58,9 @@ docker run --rm --privileged --network host \
     s41m0n/dechainy:latest
 ```
 
-If you are willing to use TensorFlow or Keras, the main [Dockerfile](../Dockerfile) accepts an additional
+If you are willing to use TensorFlow or Keras (using only CPU support by now), the main [Dockerfile](../Dockerfile) accepts an additional
 parameter to include such additional packages:
 
 ```bash
-docker build --build-arg DEFAULT_BUILDTYPE=ml -t s41m0n/dechainy:ml-cpu .
-```
-
-Finally, if you want to exploit your GPU usage, you should use the [Dockerfile.gpu](../Dockerfile.gpu) file.
-
-```bash
-docker build -f Dockerfile.gpu -t s41m0n/dechainy:ml-gpu .
+docker build --build-arg DEFAULT_BUILDTYPE=ml -t s41m0n/dechainy:ml .
 ```

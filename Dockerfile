@@ -11,71 +11,41 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-########################################
-# Builder image, to compile latest BCC #
-########################################
-FROM ubuntu:18.04 as builder
+FROM s41m0n/bcc:latest
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt update -y && \
-    apt install -y pbuilder aptitude && \
-    cd /root && \
-    git clone https://github.com/iovisor/bcc.git && \
-    cd /root/bcc && \
-    if [ $(arch) = "aarch64" ]; then \
-      apt install -y python python-pip debhelper cmake libllvm9 llvm-9-dev libclang-9-dev clang-format-9 libelf-dev bison flex libfl-dev libedit-dev zlib1g-dev python luajit libluajit-5.1-dev arping iputils-ping iperf netperf ethtool dh-python python3-netaddr python3-pyroute2 python-netaddr && \
-      pip install netaddr pyroute2 && \
-      pip2 install netaddr pyroute2; \
-    else \
-      /usr/lib/pbuilder/pbuilder-satisfydepends; \
-    fi && \
-    ./scripts/build-deb.sh release
-
-######################
-# Final Docker image #
-######################
-FROM ubuntu:20.04
-
-ARG DEBIAN_FRONTEND=noninteractive
-
-# Supported "default", "test" and "ml"
+# Supported "default", "docgen", "test", "ml"
 ARG DEFAULT_BUILDTYPE="default"
 ENV BUILDTYPE=$DEFAULT_BUILDTYPE
 
-COPY --from=builder /root/bcc/*.deb /root/bcc/
 COPY . /app
 WORKDIR /app
 
-RUN \
-  apt update -y && \
-  apt install -y libncurses5 binutils python python3.9 python3-pip libelf1 kmod  && \
-  pip3 install dnslib cachetools  && \
-  rm -f /usr/bin/python3 && \
-  ln -s /usr/bin/python3.9 /usr/bin/python3 && \
-  if [ "$BUILDTYPE" = "test" ] ; then       \
-    pip3 install pytest flake8;              \
-  else                                      \
-    rm -rf /app/tests;                      \
-  fi && \
-  if [ "$BUILDTYPE" = "ml" ] ; then \
-    if [ $(arch) = "aarch64" ]; then \
-      apt install -y python3.9-dev curl build-essential pkg-config libhdf5-dev && \
-      curl -sc /tmp/cookie "https://drive.google.com/uc?export=download&id=1EsObTazsUxmIBj-37L3I2hTdXvVItQD8" > /dev/null && \
-      CODE="$(awk '/_warning_/ {print $NF}' /tmp/cookie)" && \
-      curl -Lb /tmp/cookie "https://drive.google.com/uc?export=download&confirm=${CODE}&id=1EsObTazsUxmIBj-37L3I2hTdXvVItQD8" -o tensorflow-2.5.0-cp39-none-linux_aarch64.whl && \
-      pip3 install tensorflow-2.5.0-cp39-none-linux_aarch64.whl && \
-      apt remove curl build-essential python3.9-dev; \
-    else \
-      pip3 install tensorflow; \
-    fi\
-  fi && \
-  dpkg -i /root/bcc/*.deb && \
-  pip install -r requirements.txt && \
-  rm -rf /root/bcc && \
-  apt clean && \
-  apt autoremove -y
+RUN if [ "$BUILDTYPE" = "test" ] ; then       \
+      pip install pytest flake8;              \
+    else                                      \
+      rm -rf /app/tests;                      \
+    fi
+
+RUN if [ "$BUILDTYPE" = "ml" ] ; then \
+      if [ $(arch) = "aarch64" ]; then \
+        apt update && apt install -y python3.9-dev curl build-essential pkg-config libhdf5-dev && \
+        curl -sc /tmp/cookie "https://drive.google.com/uc?export=download&id=1EsObTazsUxmIBj-37L3I2hTdXvVItQD8" > /dev/null && \
+        CODE="$(awk '/_warning_/ {print $NF}' /tmp/cookie)" && \
+        curl -Lb /tmp/cookie "https://drive.google.com/uc?export=download&confirm=${CODE}&id=1EsObTazsUxmIBj-37L3I2hTdXvVItQD8" -o tensorflow-2.5.0-cp39-none-linux_aarch64.whl && \
+        pip install tensorflow-2.5.0-cp39-none-linux_aarch64.whl && \
+        apt remove curl build-essential python3.9-dev &&\
+        apt clean && apt autoremove -y; \
+      else \
+        pip3 install tensorflow; \
+      fi\
+    fi &&\
+    pip install -r requirements.txt
+
+RUN if [ "$BUILDTYPE" = "docgen" ] ; then \
+      pip install pdoc3;\
+    fi
 
 CMD ["python3", "-W ignore"]
 
